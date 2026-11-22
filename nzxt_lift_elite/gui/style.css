@@ -1,0 +1,97 @@
+/* Lift Elite Control — extra styling on top of libadwaita (light and dark). */
+
+.sidebar-pane {
+  background-color: alpha(@window_fg_color, 0.03);
+}
+
+.hero-card {
+  border-radius: 18px;
+  padding: 10px;
+  background-image: radial-gradient(circle at 50% 35%, alpha(@accent_bg_color, 0.20), transparent 70%);
+  background-color: alpha(@card_bg_color, 0.6);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.07);
+}
+
+.app-title {
+  font-weight: 800;
+  font-size: 1.35em;
+  letter-spacing: 0.02em;
+}
+
+.connection-pill {
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-weight: 700;
+  font-size: 0.85em;
+}
+.connection-pill.wired {
+  background-color: alpha(@success_bg_color, 0.18);
+  color: @success_color;
+}
+.connection-pill.wireless {
+  background-color: alpha(@accent_bg_color, 0.18);
+  color: @accent_color;
+}
+.connection-pill.demo {
+  background-color: alpha(@warning_bg_color, 0.22);
+  color: @warning_color;
+}
+
+.slot-switcher button {
+  min-width: 46px;
+  min-height: 40px;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+}
+
+.dirty-mark {
+  color: @accent_color;
+  font-weight: 900;
+}
+
+.stage-row.active-stage {
+  background-color: alpha(@accent_bg_color, 0.13);
+}
+.stage-row.active-stage .title {
+  font-weight: 800;
+}
+
+.dpi-spin {
+  font-feature-settings: "tnum";
+  font-weight: 700;
+}
+
+.action-chip {
+  font-weight: 600;
+}
+.action-chip.changed {
+  color: @accent_color;
+}
+
+.picker-header {
+  padding: 6px 12px 10px 12px;
+}
+
+.category-header {
+  font-weight: 800;
+  font-size: 0.85em;
+  opacity: 0.65;
+  margin: 14px 14px 4px 14px;
+}
+
+.code-label {
+  font-family: monospace;
+  font-size: 0.85em;
+  opacity: 0.6;
+}
+
+.footer-note {
+  font-size: 0.85em;
+  opacity: 0.6;
+}
+
+/* Prepared (disabled until 0x44/0x45 are confirmed): mark the profile
+   currently active on the mouse in the slot switcher. */
+.slot-switcher .onboard-active {
+    font-weight: 600;
+}

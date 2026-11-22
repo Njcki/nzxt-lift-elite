@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Avvio della GUI dal checkout, senza installare il pacchetto."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from nzxt_lift_elite.gui.app import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

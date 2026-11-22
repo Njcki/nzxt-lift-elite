@@ -1,0 +1,66 @@
+# Local PKGBUILD (not published on the AUR). Build from this folder:
+#   makepkg -si
+# It packages the checkout two folders up; the fw/ research folder is never copied.
+pkgbase=nzxt-lift-elite
+pkgname=(nzxt-lift-elite nzxt-lift-elite-coolercontrol)
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="Unofficial tools for the NZXT Lift Elite mouse (library, liftctl CLI, Lift Elite Control GUI)"
+arch=(any)
+license=(GPL-3.0-or-later)
+makedepends=(python-build python-installer python-setuptools python-wheel python-grpcio-tools)
+checkdepends=(python-grpcio python-protobuf)
+source=()
+
+_src() { echo "$srcdir/$pkgbase-$pkgver"; }
+
+prepare() {
+  local top="$startdir/../.."
+  rm -rf "$(_src)"
+  mkdir -p "$(_src)"
+  cp -a "$top"/{nzxt_lift_elite,tests,cc-plugin,data,pyproject.toml,README.md,PROTOCOL.md,LICENSE,70-nzxt-lift-elite.rules} "$(_src)/"
+  find "$(_src)" -name __pycache__ -type d -prune -exec rm -rf {} +
+  rm -rf "$(_src)/cc-plugin/gen"
+}
+
+build() {
+  cd "$(_src)"
+  python -m build --wheel --no-isolation
+  cc-plugin/build_stubs.sh gen >/dev/null  # writes cc-plugin/gen
+}
+
+check() {
+  cd "$(_src)"
+  # the GUI smoke test skips itself without a display
+  python -m unittest discover -s tests -t .
+}
+
+package_nzxt-lift-elite() {
+  depends=(python python-gobject gtk4 libadwaita python-pyudev)
+  cd "$(_src)"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 70-nzxt-lift-elite.rules "$pkgdir/usr/lib/udev/rules.d/70-nzxt-lift-elite.rules"
+  install -Dm644 data/io.github.liftelite.Control.desktop -t "$pkgdir/usr/share/applications/"
+  install -Dm644 data/io.github.liftelite.Control.metainfo.xml -t "$pkgdir/usr/share/metainfo/"
+  install -Dm644 data/icons/hicolor/scalable/apps/io.github.liftelite.Control.svg \
+    -t "$pkgdir/usr/share/icons/hicolor/scalable/apps/"
+  install -Dm644 data/icons/hicolor/symbolic/apps/io.github.liftelite.Control-symbolic.svg \
+    -t "$pkgdir/usr/share/icons/hicolor/symbolic/apps/"
+  install -Dm644 README.md PROTOCOL.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}
+
+package_nzxt-lift-elite-coolercontrol() {
+  pkgdesc="CoolerControl plugin for the NZXT Lift Elite mouse (DPI stage, polling, lift-off, motion sync, profile LED)"
+  depends=(nzxt-lift-elite python-grpcio python-protobuf)
+  optdepends=('coolercontrol: the daemon that loads the plugin')
+  install=nzxt-lift-elite-coolercontrol.install
+  cd "$(_src)"
+  local lib="$pkgdir/usr/lib/nzxt-lift-elite/coolercontrol"
+  local plug="$pkgdir/var/lib/coolercontrol/plugins/nzxt_lift_elite"
+  install -Dm644 cc-plugin/server.py "$lib/server.py"
+  cp -a cc-plugin/gen "$lib/gen"
+  find "$lib/gen" -type f -exec chmod 644 {} +
+  install -Dm644 cc-plugin/manifest.toml "$plug/manifest.toml"
+  install -Dm755 cc-plugin/nzxt_lift_elite "$plug/nzxt_lift_elite"
+  install -Dm644 cc-plugin/ui/index.html "$plug/ui/index.html"
+}

@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+"""Avvio del CLI senza installare il pacchetto (checkout del repository)."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from nzxt_lift_elite.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

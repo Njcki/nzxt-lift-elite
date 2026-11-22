@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=Lift Elite Control
+GenericName=Mouse configuration
+GenericName[it]=Configurazione del mouse
+Comment=Configure the NZXT Lift Elite mouse: DPI, polling, lift-off, buttons and profiles
+Comment[it]=Configura il mouse NZXT Lift Elite: DPI, polling, lift-off, tasti e profili
+Exec=lift-elite-control
+Icon=io.github.liftelite.Control
+Terminal=false
+Categories=Settings;HardwareSettings;Utility;GTK;
+Keywords=mouse;NZXT;Lift;DPI;polling;gaming;
+Keywords[it]=mouse;NZXT;Lift;DPI;polling;tasti;profili;
+StartupNotify=true
+StartupWMClass=io.github.liftelite.Control

@@ -1,0 +1,12 @@
+#!/bin/sh
+# CoolerControl starts this launcher from the plugin folder; the server itself
+# lives in /usr/lib/nzxt-lift-elite/coolercontrol (package nzxt-lift-elite-coolercontrol)
+# or, for a manual install, next to this file.
+here=$(dirname "$(readlink -f "$0")")
+for server in "$here/server.py" /usr/lib/nzxt-lift-elite/coolercontrol/server.py; do
+    if [ -f "$server" ]; then
+        exec /usr/bin/python3 "$server" --plugin-dir "$here" "$@"
+    fi
+done
+echo "nzxt_lift_elite: server.py not found" >&2
+exit 1

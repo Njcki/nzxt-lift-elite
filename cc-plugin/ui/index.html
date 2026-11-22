@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="utf-8"/>
+  <title>NZXT Lift Elite</title>
+  <script type="text/javascript" src="/plugins/lib/cc-plugin-lib.js"></script>
+  <style>
+    /* No native <select> or other popups: in the CoolerControl desktop app they can freeze
+       the window when opened from a plugin frame. */
+    body { font-family: sans-serif; line-height: 1.45; }
+    h2 { margin: .2rem 0 .6rem; }
+    .muted { opacity: .75; }
+    .row { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin: .9rem 0; }
+    .row > .lbl { width: 9rem; flex-shrink: 0; }
+    .seg { display: inline-flex; gap: .35rem; flex-wrap: wrap; }
+    .seg label { cursor: pointer; position: relative; }
+    .seg input { position: absolute; opacity: 0; pointer-events: none; }
+    .seg span { display: inline-flex; align-items: center; gap: .4rem; padding: .4rem .85rem; border-radius: .55rem;
+      border: 1px solid rgba(128,128,128,.45); font-variant-numeric: tabular-nums; }
+    .seg input:checked + span { background: rgba(80,140,255,.3); border-color: rgba(80,140,255,.95); }
+    .seg input:focus-visible + span { outline: 2px solid rgba(80,140,255,.9); }
+    .dot { width: .7rem; height: .7rem; border-radius: 50%; display: inline-block; }
+    .btn { padding: .45rem 1rem; border-radius: .55rem; border: 1px solid rgba(80,140,255,.9);
+      background: rgba(80,140,255,.25); color: inherit; cursor: pointer; }
+    .btn:disabled { opacity: .5; cursor: default; }
+    #msg { margin-left: .6rem; }
+    #msg.err { color: #e5534b; }
+    ul { padding-left: 1.2rem; }
+    code { padding: 0 .25rem; border-radius: .25rem; background: rgba(128,128,128,.18); }
+  </style>
+</head>
+<body>
+  <h2>NZXT Lift Elite</h2>
+  <p class="muted">Plugin non ufficiale. I canali del dispositivo <b>Lift Elite</b> (stadio DPI, polling,
+    lift-off, motion sync, LED del profilo) modificano <b>un</b> profilo memorizzato nel mouse: scegli quale.</p>
+
+  <div class="row">
+    <span class="lbl">Profilo da comandare</span>
+    <span class="seg" id="slots">
+      <label><input type="radio" name="slot" value="0"><span><i class="dot" style="background:#3b82f6"></i>1</span></label>
+      <label><input type="radio" name="slot" value="1"><span><i class="dot" style="background:#ef4444"></i>2</span></label>
+      <label><input type="radio" name="slot" value="2"><span><i class="dot" style="background:#22c55e"></i>3</span></label>
+      <label><input type="radio" name="slot" value="3"><span><i class="dot" style="background:#eab308"></i>4</span></label>
+      <label><input type="radio" name="slot" value="4"><span><i class="dot" style="background:#a855f7"></i>5</span></label>
+    </span>
+  </div>
+  <div class="row">
+    <button class="btn" id="save">Salva</button><span id="msg"></span>
+  </div>
+
+  <ul class="muted">
+    <li>I puntini colorati sono i colori di fabbrica di ciascun profilo (blu, rosso, verde, giallo, viola).
+      In CoolerControl puoi anche impostare il colore del LED del profilo scelto (si vede per circa due
+      secondi quando cambi profilo tenendo premuto il tasto viola). Per riportare i cinque colori di
+      fabbrica usa <code>liftctl restore-led-colors</code>. Il profilo attivo non si può leggere né
+      scegliere via USB: scegli qui quello che usi.</li>
+    <li>Dopo il salvataggio riavvia il plugin o CoolerControl (<code>sudo systemctl restart coolercontrold</code>)
+      perché le etichette dei canali mostrino il nuovo profilo; le modifiche vanno comunque già al profilo scelto.</li>
+    <li>8000 Hz funziona solo con il cavo. Il plugin scrive solo se il valore cambia e poi rilegge il mouse.</li>
+    <li>Se scolleghi e ricolleghi il cavo o il ricevitore, il plugin se ne accorge e riapre il dispositivo da solo (preferisce il cavo se sono presenti entrambi). Non scrive nulla in automatico.</li>
+    <li>Per DPI dei singoli stadi, tasti e profili con nome usa <code>lift-elite-control</code> o <code>liftctl</code>.</li>
+  </ul>
+
+<script type="text/javascript">
+  const TIMEOUT_MS = 10000
+  const byId = (id) => document.getElementById(id)
+  const say = (text, err) => { const m = byId('msg'); m.textContent = text; m.className = err ? 'err' : '' }
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))])
+  let lastSaveOk = false
+  let saving = false
+
+  const selected = () => { const r = document.querySelector('input[name=slot]:checked'); return r ? Number(r.value) : 0 }
+  const select = (v) => { const r = document.querySelector(`input[name=slot][value="${v}"]`); if (r) r.checked = true }
+
+  const save = async () => {
+    if (saving) return
+    saving = true
+    lastSaveOk = false
+    byId('save').disabled = true
+    say('Salvataggio…')
+    try {
+      await withTimeout(savePluginConfig({ profile_slot: selected() }), TIMEOUT_MS)
+      if (lastSaveOk) say('Salvato ✔ profilo ' + (selected() + 1))
+      else say('CoolerControl non ha salvato le impostazioni. Riprova.', true)
+    } catch (e) {
+      say('Nessuna risposta da CoolerControl: impostazioni non salvate.', true)
+    } finally {
+      saving = false
+      byId('save').disabled = false
+    }
+  }
+
+  let started = false
+  const init = async () => {
+    if (started) return
+    started = true
+    select(0)
+    try {
+      const cfg = await withTimeout(getPluginConfig(), TIMEOUT_MS)
+      if (cfg && Number.isInteger(cfg.profile_slot) && cfg.profile_slot >= 0 && cfg.profile_slot <= 4) select(cfg.profile_slot)
+    } catch (e) {
+      say('Impostazioni salvate non caricate (nessuna risposta da CoolerControl).', true)
+    }
+  }
+
+  successfulConfigSaveCallback(() => { lastSaveOk = true })
+  byId('save').addEventListener('click', save)
+  select(0)
+  // official entry point; the fallback timer covers a parent that never answers the style request
+  runPluginScript(init)
+  setTimeout(init, TIMEOUT_MS)
+</script>
+</body>
+</html>

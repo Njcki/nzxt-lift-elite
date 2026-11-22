@@ -1,0 +1,12 @@
+# NZXT Lift Elite: mouse via USB cable (1e71:2129) and 2.4 GHz receiver (1e71:2101).
+# Gives the locally logged-in user access to the hidraw nodes (uaccess tag of
+# systemd-logind), so liftctl and Lift Elite Control work without sudo.
+# No extra group is needed.
+#
+# The package installs this file in /usr/lib/udev/rules.d/. By hand:
+#   sudo install -m 644 70-nzxt-lift-elite.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger -s hidraw
+# or unplug and replug the mouse / receiver.
+
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2129", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="2101", TAG+="uaccess"

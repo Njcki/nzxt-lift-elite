@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nzxt-lift-elite"
+version = "0.2.0"
+description = "Unofficial Linux tools for the NZXT Lift Elite mouse: library, liftctl CLI and the Lift Elite Control GUI"
+readme = "README.md"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+classifiers = [
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+[project.optional-dependencies]
+gui = ["PyGObject>=3.42", "pyudev"]
+hotplug = ["pyudev"]
+
+[project.scripts]
+liftctl = "nzxt_lift_elite.cli:main"
+
+[project.gui-scripts]
+lift-elite-control = "nzxt_lift_elite.gui.app:main"
+
+[tool.setuptools]
+packages = ["nzxt_lift_elite", "nzxt_lift_elite.gui"]
+
+[tool.setuptools.package-data]
+"nzxt_lift_elite.gui" = ["style.css"]

@@ -1,0 +1,9 @@
+# CoolerControl Service Plugin Manifest
+id = "nzxt_lift_elite"
+type = "device"
+description = "NZXT Lift Elite mouse (USB 1e71:2129 cable, 1e71:2101 receiver): active DPI stage, polling rate, lift-off, motion sync and profile LED colour of one onboard profile."
+version = "0.2.0"
+address = "/run/coolercontrol-plugin-nzxt_lift_elite.sock"
+executable = "nzxt_lift_elite"
+# root is needed to write to the raw hidraw device
+privileged = true
