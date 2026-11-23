@@ -5,8 +5,10 @@
 **Unofficial** tools for the **NZXT Lift Elite** mouse, over the USB cable
 (`1e71:2129`) or the 2.4 GHz receiver (`1e71:2101`):
 
-- **Lift Elite Control**: a GTK4/libadwaita app for DPI stages, polling rate,
-  lift-off, motion sync, button mapping and named profiles
+- **Lift Elite Control**: a GTK4/libadwaita app (English or Italian) for DPI
+  stages, polling rate, lift-off, motion sync, button mapping and named
+  profiles, including live active profile/DPI stage, optional apply-immediately
+  and a factory reset
 - **`liftctl`**: a command-line tool with the same features
 - **CoolerControl plugin** (optional): DPI stage, polling, lift-off, motion
   sync and profile LED from inside CoolerControl
@@ -171,15 +173,34 @@ wireless mouse is asleep, reads time out: move it and try again.
   saved silently first); **Discard** goes back to the values read from the mouse
 - **Apply immediately**: an optional setting that writes each change as soon
   as you make it (sliders are applied when you release the pointer)
-- **Reset to factory defaults**, next to re-read: restores the factory DPI
-  stages, polling rate, lift-off, motion sync, LED colours and buttons on
-  all five profiles, then returns to the profile that was active
-- light/dark theme following the system, or a saved preference
+- **Reset to factory defaults**: the clear icon in the header, next to
+  re-read, restores the factory DPI stages, polling rate, lift-off, motion
+  sync, LED colours and buttons on all five profiles, then returns to the
+  profile that was active (a confirmation is shown first)
+- light/dark theme following the system, or a saved preference (Appearance
+  in the menu)
 - **language**: English and Italian, from the menu (Language), `--lang`,
   `LIFT_ELITE_LANG`, the saved preference, or the system locale
 
 Options: `--device /dev/hidrawN`, `--transport wired|wireless`,
 `--theme dark|light`, `--lang it|en`, `--mock`, `--mock-wireless`.
+
+The screenshots use the built-in demo (`lift-elite-control --mock`). The
+window title shows “Demo (emulated mouse)” and the connection is the
+generic path `/dev/hidraw-mock`.
+
+![Button mapping](docs/screenshot-buttons.png)
+
+*Choosing an action for a button from the searchable list.*
+
+![Main menu](docs/screenshot-menu.png)
+
+*The menu includes **Apply immediately**, **Language** and **Appearance**.
+The clear icon in the header, next to re-read, resets all five profiles.*
+
+![Factory reset confirmation](docs/screenshot-reset.png)
+
+![Lift Elite Control, dark theme](docs/screenshot-dark.png)
 
 ## liftctl (command line)
 

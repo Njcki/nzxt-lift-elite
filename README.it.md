@@ -5,8 +5,10 @@
 Strumenti **non ufficiali** per il mouse **NZXT Lift Elite**, via cavo USB
 (`1e71:2129`) o tramite il ricevitore 2,4 GHz (`1e71:2101`):
 
-- **Lift Elite Control**: app grafica GTK4/libadwaita per stadi DPI, polling,
-  lift-off, motion sync, mappatura dei tasti e profili con nome
+- **Lift Elite Control**: app grafica GTK4/libadwaita (italiano o inglese)
+  per stadi DPI, polling, lift-off, motion sync, mappatura dei tasti e
+  profili con nome, con profilo/stadio DPI attivi in tempo reale,
+  applicazione immediata opzionale e ripristino di fabbrica
 - **`liftctl`**: riga di comando con le stesse funzioni
 - **plugin CoolerControl** (opzionale): stadio DPI, polling, lift-off, motion
   sync e LED del profilo direttamente da CoolerControl
@@ -21,7 +23,7 @@ Ogni scrittura viene riletta per verificarla e prima di scrivere viene salvato
 un backup di tutti i profili. I comandi di aggiornamento firmware non sono
 raggiungibili: la libreria li rifiuta.
 
-![Lift Elite Control](docs/screenshot.png)
+![Lift Elite Control](docs/screenshot.it.png)
 
 ## Requisiti
 
@@ -155,15 +157,22 @@ wireless dorme le letture vanno in timeout: muovilo e riprova.
   letti dal mouse
 - **Applica subito**: impostazione opzionale che scrive ogni modifica appena
   la fai (gli slider vengono applicati al rilascio del puntatore)
-- **Ripristina impostazioni di fabbrica**, di fianco a Rileggi: ripristina
-  stadi DPI, polling, lift-off, motion sync, colori LED e tasti di fabbrica
-  su tutti e cinque i profili, poi torna al profilo che era attivo
+- **Ripristina impostazioni di fabbrica**: l'icona “cancella tutto” nella
+  barra, di fianco a Rileggi, ripristina stadi DPI, polling, lift-off,
+  motion sync, colori LED e tasti di fabbrica su tutti e cinque i profili,
+  poi torna al profilo che era attivo (prima chiede conferma)
 - tema chiaro/scuro che segue il sistema, oppure una preferenza salvata
+  (Aspetto nel menu)
 - **lingua**: italiano e inglese, dal menu (Lingua), da `--lang`, da
   `LIFT_ELITE_LANG`, dalla preferenza salvata o dalla lingua di sistema
 
 Opzioni: `--device /dev/hidrawN`, `--transport wired|wireless`,
 `--theme dark|light`, `--lang it|en`, `--mock`, `--mock-wireless`.
+
+Lo screenshot è del demo incorporato (`lift-elite-control --mock`). Il
+titolo mostra “Demo (mouse emulato)” e il collegamento è il percorso
+generico `/dev/hidraw-mock`. Altre schermate (elenco azioni, menu, tema
+scuro) sono nel [README in inglese](README.md#lift-elite-control-gui).
 
 ## liftctl (riga di comando)
 
