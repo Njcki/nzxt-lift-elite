@@ -344,3 +344,243 @@ class WindowTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- periodic refresh (focused / background) ---------------------------------------------
+
+from nzxt_lift_elite.errors import ProtocolError  # noqa: E402
+from nzxt_lift_elite.gui import model as gui_model  # noqa: E402
+
+
+class RefreshModelTest(unittest.TestCase):
+    def test_intervals_are_constants(self):
+        self.assertEqual(gui_model.BATTERY_POLL_FOCUSED_S, 60)
+        self.assertEqual(gui_model.BATTERY_POLL_BACKGROUND_S, 300)
+        self.assertEqual(gui_model.BATTERY_REFRESH_ON_FOCUS_S, 60)
+        self.assertEqual(gui_model.BATTERY_STALE_S, 15 * 60)
+        self.assertGreater(gui_model.BATTERY_POLL_BACKGROUND_BACKOFF_S, gui_model.BATTERY_POLL_BACKGROUND_S)
+        self.assertFalse(hasattr(gui_model, "BATTERY_POLL_WIRED_S"))  # one focused cadence for both links
+
+    def test_failed_read_keeps_last_value_and_ages(self):
+        m = EditorModel()
+        b = parse_battery_reply(build_status_reply(percent=61, millivolts=3880, charge_state=CHARGE_DISCHARGING))
+        self.assertTrue(m.set_battery(b, now=1000.0))
+        self.assertFalse(m.set_battery(None, now=1300.0))
+        self.assertEqual(m.battery.percent, 61)
+        self.assertEqual(m.battery_age(now=1300.0), 300.0)
+        self.assertFalse(m.battery_stale(now=1000.0 + 14 * 60))
+        self.assertTrue(m.battery_stale(now=1000.0 + 16 * 60))
+        self.assertIsNone(EditorModel().battery_age())
+
+    def test_tooltip_last_reading(self):
+        i18n.set_language("en")
+        self.addCleanup(i18n.set_language, "it")
+        b = parse_battery_reply(build_status_reply(percent=61, millivolts=3880, charge_state=CHARGE_DISCHARGING))
+        self.assertTrue(battery_tooltip(b, 20 * 60).endswith("Last reading 20 min ago"))
+        self.assertNotIn("Last reading", battery_tooltip(b))
+
+
+class BackgroundPollTest(unittest.TestCase):
+    def setUp(self):
+        self.session = Session(mock="wireless")
+        self.session.read_state()
+        self.emu = self.session._fake.emulator
+        self.emu.log.clear()
+
+    def tearDown(self):
+        self.session.close()
+
+    def test_background_read_is_b0_only(self):
+        self.emu.battery.percent = 58
+        b = self.session.poll_battery()
+        self.assertEqual(b.percent, 58)
+        self.assertEqual({p[4] for p in self.emu.log}, {CMD_STATUS})  # no 0x44 / 0x92 / writes
+        self.assertEqual(self.emu.writes, [])
+
+    def test_never_overlaps_an_apply(self):
+        import threading
+
+        held, release = threading.Event(), threading.Event()
+
+        def busy():  # what Apply / reset do: hold the session I/O lock
+            with self.session._io:
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=busy)
+        t.start()
+        held.wait(5)
+        try:
+            self.assertIsNone(self.session.poll_battery())
+            self.assertEqual(self.emu.log, [])  # the mouse was not touched
+        finally:
+            release.set()
+            t.join()
+
+    def test_asleep_raises_quietly_for_the_caller(self):
+        self.emu.asleep = True
+        with self.assertRaises(ProtocolError):
+            self.session.poll_battery(timeout=0.05)
+
+    def test_not_open_returns_none(self):
+        self.session.close()
+        self.assertIsNone(self.session.poll_battery())
+
+
+@unittest.skipUnless(_gtk_available(), "GTK4/libadwaita or a display not available")
+class WindowRefreshTest(unittest.TestCase):
+    """Focus transitions and timers on the real window (mock mouse, no WM)."""
+
+    def _run(self, body):
+        from gi.repository import GLib
+
+        from nzxt_lift_elite.gui import app as gui
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        out = {}
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp.name, "LIFT_ELITE_MOCK_BATTERY": "64"}):
+            application = gui.LiftEliteApp(gui.parse_args(["--mock-wireless", "--lang", "en"]))
+
+            def check():
+                win = application.window
+                if win is None or not win.model.loaded:
+                    if time.monotonic() - out.setdefault("t0", time.monotonic()) > 10:
+                        out["timed_out"] = True
+                        application.quit()
+                        return False
+                    return True
+                try:
+                    body(win, out)
+                except Exception as exc:  # noqa: BLE001 - reported below
+                    out["error"] = exc
+                win._force_close = True
+                application.quit()
+                return False
+
+            GLib.timeout_add(100, check)
+            application.run(["lift-elite-control"])
+        i18n.set_language("it")
+        if "error" in out:
+            raise out["error"]
+        self.assertNotIn("timed_out", out, "window never loaded")
+        return out
+
+    @staticmethod
+    def _wait(cond, timeout=5.0):
+        from gi.repository import GLib
+
+        ctx = GLib.MainContext.default()
+        end = time.monotonic() + timeout
+        while not cond() and time.monotonic() < end:
+            ctx.iteration(False)
+            time.sleep(0.005)
+        return cond()
+
+    def test_unfocused_background_read_and_failure(self):
+        def body(win, out):
+            emu = win.session._fake.emulator
+            win.is_active = lambda: False
+            win._cancel_all_polls()
+            delays = []
+            real_timeout_add = __import__("gi.repository.GLib", fromlist=["GLib"]).timeout_add
+            with mock.patch("nzxt_lift_elite.gui.app.GLib.timeout_add",
+                            side_effect=lambda ms, fn: delays.append((ms, fn)) or real_timeout_add(10**7, fn)):
+                win._battery_attempt = time.monotonic()
+                win._schedule_poll()
+            out["live_armed"] = bool(win._poll_source)
+            out["bg_armed"] = bool(win._bg_battery_source)
+            out["bg_delay_ms"] = [ms for ms, fn in delays if fn == win._bg_battery_tick]
+            win._on_active_changed()
+            out["pulse_unfocused"] = win.battery.glyph.pulse_enabled
+            # the background tick itself: b0 only
+            win._cancel_bg_battery()
+            emu.log.clear()
+            emu.battery.percent = 55
+            win._bg_battery_tick()
+            self._wait(lambda: not win._bg_battery_inflight)
+            out["bg_cmds"] = {p[4] for p in emu.log}
+            out["after_ok"] = (win.model.battery.percent, win.row_battery.get_subtitle())
+            # asleep: value kept, no error, then dimmed once it is old
+            win._cancel_bg_battery()
+            emu.asleep = True
+            win._bg_battery_tick()
+            self._wait(lambda: not win._bg_battery_inflight, 10)
+            out["after_fail"] = (win.model.battery.percent, win._bg_battery_failures)
+            out["stale_fresh"] = win.battery.has_css_class("stale")
+            win.model.battery_time = time.monotonic() - 20 * 60
+            win._sync_battery()
+            out["stale_old"] = win.battery.has_css_class("stale")
+            out["tooltip_old"] = win.battery.get_tooltip_text()
+            win._bg_battery_failures = 3
+            out["backoff"] = win._bg_battery_interval()
+            emu.asleep = False
+            win._cancel_all_polls()
+
+        out = self._run(body)
+        self.assertFalse(out["live_armed"])  # no 0x44/0x92 poll while unfocused
+        self.assertTrue(out["bg_armed"])
+        self.assertTrue(out["bg_delay_ms"])
+        self.assertAlmostEqual(out["bg_delay_ms"][0] / 1000, gui_model.BATTERY_POLL_BACKGROUND_S, delta=2)
+        self.assertFalse(out["pulse_unfocused"])
+        self.assertEqual(out["bg_cmds"], {CMD_STATUS})
+        self.assertEqual(out["after_ok"][0], 55)
+        self.assertTrue(out["after_ok"][1].startswith("55 %"))
+        self.assertEqual(out["after_fail"], (55, 1))
+        self.assertFalse(out["stale_fresh"])
+        self.assertTrue(out["stale_old"])
+        self.assertIn("Last reading 20 min ago", out["tooltip_old"])
+        self.assertEqual(out["backoff"], gui_model.BATTERY_POLL_BACKGROUND_BACKOFF_S)
+
+    def test_focus_return_and_focused_cadence(self):
+        def body(win, out):
+            win._cancel_all_polls()
+            win.is_active = lambda: True
+            # recent value: focus does not force a read
+            win.model.battery_time = time.monotonic() - 10
+            win._battery_attempt = time.monotonic() - 10
+            win._on_active_changed()
+            out["recent_attempt_kept"] = win._battery_attempt > 0
+            out["bg_after_focus"] = bool(win._bg_battery_source)
+            out["pulse_focused"] = win.battery.glyph.pulse_enabled
+            win._cancel_all_polls()
+            # old value (> 60 s): immediate refresh with b0 in the live poll
+            win.model.battery_time = time.monotonic() - 120
+            win._on_active_changed()
+            out["forced_attempt"] = win._battery_attempt
+            out["live_armed"] = bool(win._poll_source)
+            win._cancel_all_polls()
+            emu = win.session._fake.emulator
+            emu.log.clear()
+            emu.battery.percent = 47
+            win._poll_tick()
+            out["with_battery"] = win._poll_with_battery
+            self._wait(lambda: not win._poll_inflight)
+            out["cmds"] = {p[4] for p in emu.log}
+            out["pct"] = win.model.battery.percent
+            win._cancel_all_polls()
+            # just read: the next live poll skips b0 until 60 s have passed
+            emu.log.clear()
+            win._poll_tick()
+            out["with_battery_next"] = win._poll_with_battery
+            self._wait(lambda: not win._poll_inflight)
+            out["cmds_next"] = {p[4] for p in emu.log}
+            win._cancel_all_polls()
+            win._battery_attempt = time.monotonic() - gui_model.BATTERY_POLL_FOCUSED_S - 1
+            win._poll_tick()
+            out["with_battery_due"] = win._poll_with_battery
+            self._wait(lambda: not win._poll_inflight)
+            win._cancel_all_polls()
+
+        out = self._run(body)
+        self.assertTrue(out["recent_attempt_kept"])
+        self.assertFalse(out["bg_after_focus"])
+        self.assertTrue(out["pulse_focused"])
+        self.assertEqual(out["forced_attempt"], 0.0)
+        self.assertTrue(out["live_armed"])
+        self.assertTrue(out["with_battery"])
+        self.assertIn(CMD_STATUS, out["cmds"])
+        self.assertEqual(out["pct"], 47)
+        self.assertFalse(out["with_battery_next"])
+        self.assertNotIn(CMD_STATUS, out["cmds_next"])
+        self.assertTrue(out["with_battery_due"])

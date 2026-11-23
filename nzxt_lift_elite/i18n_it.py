@@ -463,4 +463,5 @@ IT: dict[str, str] = {
     'Battery: {pct} %': 'Batteria: {pct} %',
     'Voltage: {v} V': 'Tensione: {v} V',
     'Temperature: {t} °C': 'Temperatura: {t} °C',
+    'Last reading {n} min ago': 'Ultima lettura {n} min fa',
 }

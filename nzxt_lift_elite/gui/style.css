@@ -133,6 +133,8 @@
   box-shadow: inset 0 0 0 1px alpha(@error_bg_color, 0.22);
 }
 .battery-chip.unknown { opacity: 0.55; }
+/* last reading older than BATTERY_STALE_S (mouse asleep / read failed): value kept, dimmed */
+.battery-chip.stale { opacity: 0.72; }
 .battery-percent {
   font-weight: 700;
   font-size: 1.0em;

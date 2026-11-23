@@ -171,8 +171,16 @@ confirmed by watching it drop on battery (`liftctl battery --watch 300`): the
 current unit and sign convention, and the exact SOC behaviour near 100 % while
 charging.
 Tools: `liftctl battery [--json] [--watch SECONDS]`, the GUI battery indicator
-(read on connect and every 30 s on the cable / 60 s through the receiver, only
-while the window is focused). The CoolerControl plugin does not expose it: its
+(read on connect; constants in `gui/model.py`). Focused: `b0` rides on the live
+poll every 60 s (`BATTERY_POLL_FOCUSED_S`), cable and receiver alike. Unfocused
+or minimised: a separate `b0`-only read every 300 s (`BATTERY_POLL_BACKGROUND_S`),
+never `44`/`92`, backing off to 600 s after 3 consecutive failures. Every read
+takes the device lock non-blocking, so it is skipped (never queued) while an
+apply/reset/write holds it. A failed read keeps the last value silently; after
+15 min (`BATTERY_STALE_S`) the indicator is dimmed and the tooltip shows its age.
+On focus return the battery is re-read at once if the reading is older than
+60 s. The charging pulse runs only while focused; a hidden window updates the
+value without redrawing. The CoolerControl plugin does not expose it: its
 status metrics are temperature, fan speed, MHz and watts only, with no percent.
 
 ### Receiver

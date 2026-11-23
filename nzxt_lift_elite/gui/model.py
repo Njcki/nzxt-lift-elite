@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,7 +131,8 @@ def battery_subtitle(b: BatteryStatus | None) -> str:
     return f"{b.percent} %{est} · {_decimal(b.millivolts / 1000, 2)} V · {charge_label(b)}"
 
 
-def battery_tooltip(b: BatteryStatus | None) -> str:
+def battery_tooltip(b: BatteryStatus | None, age: float | None = None) -> str:
+    """Tooltip text; ``age`` (seconds) adds a "last reading" line for an old value."""
     if not battery_ok(b):
         return _("Battery level not available (the mouse has not reported it yet)")
     lines = [_("Battery: {pct} %", pct=b.percent) + (" " + _("(estimated)") if b.estimated else ""),
@@ -138,6 +140,8 @@ def battery_tooltip(b: BatteryStatus | None) -> str:
              charge_label(b)]
     if b.temperature_c is not None:
         lines.append(_("Temperature: {t} °C", t=b.temperature_c))
+    if age is not None:
+        lines.append(_("Last reading {n} min ago", n=max(1, round(age / 60))))
     return "\n".join(lines)
 
 
@@ -160,8 +164,27 @@ class EditorModel:
     onboard_active_profile: int | None = None
     # «Rendi attivo»: slot to activate (0x45) at the next Applica, or None.
     pending_activation: int | None = None
-    # Last battery reading (b0), or None if never read / failed.
+    # Last good battery reading (b0) and when it was taken (time.monotonic()),
+    # or None. A failed read keeps the previous value.
     battery: BatteryStatus | None = None
+    battery_time: float | None = None
+
+    def set_battery(self, battery: BatteryStatus | None, now: float | None = None) -> bool:
+        """Store a reading; None (failed read) keeps the last value. Returns True if stored."""
+        if battery is None:
+            return False
+        self.battery = battery
+        self.battery_time = time.monotonic() if now is None else now
+        return True
+
+    def battery_age(self, now: float | None = None) -> float | None:
+        if self.battery_time is None:
+            return None
+        return (time.monotonic() if now is None else now) - self.battery_time
+
+    def battery_stale(self, now: float | None = None) -> bool:
+        age = self.battery_age(now)
+        return age is not None and age > BATTERY_STALE_S
 
     # --- loading
     def load_state(self, state: DeviceState, *, keep_selection: bool = True) -> None:
@@ -170,8 +193,7 @@ class EditorModel:
         self.device = {p.index: p for p in state.profiles}
         self.drafts = dict(self.device)
         self.onboard_active_profile = state.active_profile
-        if state.battery is not None:
-            self.battery = state.battery
+        self.set_battery(state.battery)
         if first or not keep_selection or self.selected not in self.device:
             # Start on the profile the mouse is using (0x44), else profile 1.
             active = state.active_profile
@@ -190,8 +212,7 @@ class EditorModel:
         self.device = {p.index: p for p in state.profiles}
         self.drafts = dict(self.device)
         self.onboard_active_profile = state.active_profile
-        if state.battery is not None:
-            self.battery = state.battery
+        self.set_battery(state.battery)
         kept = False
         for index, draft in kept_drafts.items():
             if index in self.drafts:
@@ -443,9 +464,13 @@ POLL_INTERVAL_WIRED_MS = 700
 POLL_INTERVAL_WIRELESS_MS = 1000
 POLL_BACKOFF_MS = 5000  # after repeated failures (mouse asleep, busy, unplugged)
 POLL_FAILURES_BEFORE_BACKOFF = 3
-# Battery (b0) cadence inside the live poll: the fuel gauge changes slowly.
-BATTERY_POLL_WIRED_S = 30.0
-BATTERY_POLL_WIRELESS_S = 60.0
+# Battery (b0) cadence. The fuel gauge changes slowly, so:
+BATTERY_POLL_FOCUSED_S = 60.0  # focused window: b0 added to the live poll (cable and receiver)
+BATTERY_POLL_BACKGROUND_S = 300.0  # unfocused / minimised: b0 only, nothing else
+BATTERY_POLL_BACKGROUND_BACKOFF_S = 600.0  # background, after repeated failures (asleep)
+BATTERY_FAILURES_BEFORE_BACKOFF = 3
+BATTERY_REFRESH_ON_FOCUS_S = 60.0  # on focus, read at once if the value is older than this
+BATTERY_STALE_S = 15 * 60.0  # older readings are shown dimmed (value kept)
 
 
 class Session:
@@ -543,6 +568,23 @@ class Session:
                         battery = None
             return StagePoll(active_profile=active, slot=slot, stage=profile.stage, battery=battery,
                              battery_read=with_battery)
+        finally:
+            self._io.release()
+
+    def poll_battery(self, *, timeout: float = 0.6) -> "BatteryStatus | None":
+        """Background battery read: ONLY ``b0`` (no 0x44 / 0x92), one short
+        attempt, under the device lock. Returns None without touching the
+        mouse when another operation (Apply, reset, full read, live poll) is
+        running in this process or the device is not open.
+        Raises DeviceBusyError / ProtocolError / OSError on failure."""
+        if not self._io.acquire(blocking=False):
+            return None
+        try:
+            dev = self._dev
+            if dev is None:
+                return None
+            with self._quick(dev, timeout):
+                return dev.read_battery()
         finally:
             self._io.release()
 

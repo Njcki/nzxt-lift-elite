@@ -148,8 +148,12 @@ wireless dorme le letture vanno in timeout: muovilo e riprova.
 - **batteria**: percentuale dal fuel gauge del mouse, più tensione, stato
   di carica, temperatura e numero di cicli. Un indicatore sta sulla scheda
   dell'anteprima (i dettagli nel suggerimento e nella sezione Dispositivo).
-  Viene letto all'aggancio e poi ogni 30 s via cavo o 60 s tramite il
-  ricevitore, solo con la finestra in primo piano, e funziona su entrambi.
+  Viene letto all'aggancio e poi ogni 60 s con la finestra in primo piano
+  (cavo e ricevitore). Se la finestra non è attiva o è ridotta a icona,
+  una lettura solo della batteria avviene ogni 5 minuti (10 minuti dopo 3
+  errori) e di nuovo al ritorno del focus se l'ultima lettura ha più di
+  60 s. Se una lettura fallisce resta l'ultimo valore; dopo 15 minuti
+  l'indicatore si attenua. Funziona su cavo e ricevitore.
 - **collegamento in tempo reale**: se attacchi o stacchi il cavo o il
   ricevitore l'app se ne accorge da sola (preferisce il cavo se ci sono
   entrambi); le modifiche non salvate restano e non scrive nulla da sola

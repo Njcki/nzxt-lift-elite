@@ -51,8 +51,11 @@ def preview_art():
     return vector_diagram
 from .i18n import _  # noqa: E402
 from .model import (  # noqa: E402
-    BATTERY_POLL_WIRED_S,
-    BATTERY_POLL_WIRELESS_S,
+    BATTERY_FAILURES_BEFORE_BACKOFF,
+    BATTERY_POLL_BACKGROUND_BACKOFF_S,
+    BATTERY_POLL_BACKGROUND_S,
+    BATTERY_POLL_FOCUSED_S,
+    BATTERY_REFRESH_ON_FOCUS_S,
     BUTTON_LABELS,
     POLL_BACKOFF_MS,
     POLL_FAILURES_BEFORE_BACKOFF,
@@ -484,7 +487,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._poll_source = 0
         self._poll_inflight = False
         self._poll_failures = 0
-        self._battery_due = 0.0  # monotonic time of the next b0 read in the live poll
+        # battery: last b0 attempt (monotonic), background b0-only timer
+        self._battery_attempt = 0.0
+        self._poll_with_battery = False
+        self._bg_battery_source = 0
+        self._bg_battery_inflight = False
+        self._bg_battery_failures = 0
         self.connect("notify::is-active", lambda *_a: self._on_active_changed())
         self._sync_header()
         self._start_monitor()
@@ -1234,14 +1242,14 @@ class MainWindow(Adw.ApplicationWindow):
             self.device_present = True
             if self.model.loaded and self.model.any_dirty:
                 kept = self.model.adopt_state(state)
-                self._battery_due = time.monotonic() + self._battery_interval()
+                self._battery_attempt = time.monotonic()
                 self.stack.set_visible_child_name("main")
                 self.populate()
                 if kept:
                     self.toast(_("Re-read the mouse. Unsaved changes were kept."))
             else:
                 self.model.load_state(state)
-                self._battery_due = time.monotonic() + self._battery_interval()
+                self._battery_attempt = time.monotonic()
                 self.stack.set_visible_child_name("main")
                 self.populate()
             self.app.on_loaded(self)
@@ -1611,24 +1619,96 @@ class MainWindow(Adw.ApplicationWindow):
 
     # --- battery ----------------------------------------------------------------------------
     #
-    # Read with the same read-only b0 status command CAM uses after a write:
-    # once in read_state (connect / refresh) and then every 30 s (cable) or
-    # 60 s (receiver) inside the focused-only live poll, under the device lock.
+    # Read with the read-only b0 status command (the one CAM sends after a
+    # write), always under the device lock and never while Apply / reset /
+    # a full read is running (Session._io, non-blocking):
+    # - once in read_state (connect / refresh);
+    # - focused window: added to the live poll every BATTERY_POLL_FOCUSED_S;
+    # - unfocused or minimised: a b0-only read every BATTERY_POLL_BACKGROUND_S
+    #   (no 0x44 / 0x92), slower after repeated failures;
+    # - focus back: at once if the value is older than BATTERY_REFRESH_ON_FOCUS_S.
+    # A failed read keeps the last value (dimmed when older than
+    # BATTERY_STALE_S) and shows no error.
 
-    def _battery_interval(self) -> float:
-        return BATTERY_POLL_WIRELESS_S if self.model.transport == "wireless" else BATTERY_POLL_WIRED_S
+    def _window_visible(self) -> bool:
+        suspended = getattr(self, "is_suspended", None)
+        return self.get_mapped() and not (suspended() if suspended else False)
 
-    def _sync_battery(self, *, animate: bool = True) -> None:
+    def _sync_battery(self) -> None:
         present = self.device_present or self.session.is_mock
         b = self.model.battery if present else None
-        self.battery.set_status(b if battery_ok(b) else None, animate=animate)
-        self.battery.set_tooltip_text(battery_tooltip(b))
+        # Hidden / minimised: just update the value (no animation, no frames).
+        self.battery.set_status(b if battery_ok(b) else None, animate=self._window_visible())
+        stale = bool(present and battery_ok(b) and self.model.battery_stale())
+        (self.battery.add_css_class if stale else self.battery.remove_css_class)("stale")
+        self.battery.set_tooltip_text(battery_tooltip(b, self.model.battery_age() if stale else None))
         self.row_battery.set_subtitle(battery_subtitle(b) if present else "—")
         self.battery.set_pulse_enabled(self.is_active())
 
+    def _battery_refresh_due_on_focus(self) -> bool:
+        age = self.model.battery_age()
+        return age is None or age > BATTERY_REFRESH_ON_FOCUS_S
+
     def _on_active_changed(self) -> None:
-        self.battery.set_pulse_enabled(self.is_active())
+        active = self.is_active()
+        self.battery.set_pulse_enabled(active)  # the charging pulse runs only while focused
+        if active:
+            self._cancel_bg_battery()
+            if self.model.loaded and self._battery_refresh_due_on_focus():
+                self._battery_attempt = 0.0  # the next live poll includes b0 …
+                self._cancel_poll()  # … and runs right away
+                self._schedule_poll(delay=0)
         self._schedule_poll()
+
+    def _bg_battery_wanted(self) -> bool:
+        return (
+            not getattr(self.app.args, "screenshot", None)
+            and self.model.loaded
+            and self.device_present
+            and not self.is_active()
+            and not self.spinner.get_spinning()
+            and not self._hotplug_refreshing
+            and not self._auto_inflight
+            and self.stack.get_visible_child_name() == "main"
+        )
+
+    def _bg_battery_interval(self) -> float:
+        if self._bg_battery_failures >= BATTERY_FAILURES_BEFORE_BACKOFF:
+            return BATTERY_POLL_BACKGROUND_BACKOFF_S
+        return BATTERY_POLL_BACKGROUND_S
+
+    def _schedule_bg_battery(self) -> None:
+        """Arm the background b0 read if wanted and none is pending (idempotent)."""
+        if self._bg_battery_source or self._bg_battery_inflight or not self._bg_battery_wanted():
+            return
+        delay = max(0.0, self._battery_attempt + self._bg_battery_interval() - time.monotonic())
+        self._bg_battery_source = GLib.timeout_add(int(delay * 1000), self._bg_battery_tick)
+
+    def _cancel_bg_battery(self) -> None:
+        if self._bg_battery_source:
+            GLib.source_remove(self._bg_battery_source)
+            self._bg_battery_source = 0
+
+    def _bg_battery_tick(self) -> bool:
+        self._bg_battery_source = 0
+        if self._bg_battery_inflight or not self._bg_battery_wanted():
+            return False  # re-armed by focus / busy / populate events
+        self._bg_battery_inflight = True
+        self._battery_attempt = time.monotonic()
+        timeout = 0.6 if self.model.transport == "wireless" else 0.3
+        run_in_thread(lambda: self.session.poll_battery(timeout=timeout), self._bg_battery_done)
+        return False
+
+    def _bg_battery_done(self, result, error) -> None:
+        self._bg_battery_inflight = False
+        if error is not None:
+            self._bg_battery_failures += 1  # asleep / busy / unplugged: quiet, keep the value
+        elif result is not None:
+            self._bg_battery_failures = 0
+            self.model.set_battery(result)
+        if self.model.loaded:
+            self._sync_battery()  # also refreshes the "stale" dimming
+        self._schedule_bg_battery()
 
     def _poll_wanted(self) -> bool:
         return (
@@ -1647,7 +1727,9 @@ class MainWindow(Adw.ApplicationWindow):
         return POLL_INTERVAL_WIRELESS_MS if self.model.transport == "wireless" else POLL_INTERVAL_WIRED_MS
 
     def _schedule_poll(self, delay: int | None = None) -> None:
-        """Arm the next poll if wanted and none is pending (idempotent)."""
+        """Arm the next poll if wanted and none is pending (idempotent).
+        Also (re)arms the background battery read when unfocused."""
+        self._schedule_bg_battery()
         if self._poll_source or self._poll_inflight or not self._poll_wanted():
             return
         self._poll_source = GLib.timeout_add(self._poll_interval() if delay is None else delay, self._poll_tick)
@@ -1657,6 +1739,10 @@ class MainWindow(Adw.ApplicationWindow):
             GLib.source_remove(self._poll_source)
             self._poll_source = 0
 
+    def _cancel_all_polls(self) -> None:
+        self._cancel_poll()
+        self._cancel_bg_battery()
+
     def _poll_tick(self) -> bool:
         self._poll_source = 0
         if self._poll_inflight or not self._poll_wanted():
@@ -1665,7 +1751,8 @@ class MainWindow(Adw.ApplicationWindow):
         m = self.model
         fallback = m.onboard_active_profile if m.onboard_active_profile is not None else m.selected
         timeout = 0.6 if m.transport == "wireless" else 0.3
-        with_battery = time.monotonic() >= self._battery_due
+        with_battery = time.monotonic() - self._battery_attempt >= BATTERY_POLL_FOCUSED_S
+        self._poll_with_battery = with_battery
         run_in_thread(lambda: self.session.poll_active_stage(fallback, timeout=timeout, with_battery=with_battery),
                       self._poll_done)
         return False
@@ -1676,14 +1763,17 @@ class MainWindow(Adw.ApplicationWindow):
             # Quiet on purpose: asleep (wireless), busy (liftctl / plugin) or
             # unplugged (hotplug handles it). Back off after a few failures.
             self._poll_failures += 1
+            if self._poll_with_battery:
+                self._battery_attempt = time.monotonic()  # retry b0 at the normal cadence
+                if self.model.loaded:
+                    self._sync_battery()  # keeps the last value, may dim it
         else:
             self._poll_failures = 0
             if result is not None and self.model.loaded:
                 if result.battery_read:
-                    self._battery_due = time.monotonic() + self._battery_interval()
-                    if result.battery is not None:
-                        self.model.battery = result.battery
-                        self._sync_battery()
+                    self._battery_attempt = time.monotonic()
+                    self.model.set_battery(result.battery)  # None (failed) keeps the last value
+                    self._sync_battery()
                 self._on_device_stage(result)
         self._schedule_poll()
 
@@ -1762,10 +1852,10 @@ class MainWindow(Adw.ApplicationWindow):
                 kept = False
                 if self.model.loaded:
                     kept = self.model.adopt_state(state)
-                    self._battery_due = time.monotonic() + self._battery_interval()
+                    self._battery_attempt = time.monotonic()
                 else:
                     self.model.load_state(state)
-                    self._battery_due = time.monotonic() + self._battery_interval()
+                    self._battery_attempt = time.monotonic()
                 self.stack.set_visible_child_name("main")
                 self.populate()
                 transport = transport_label(state.info.transport)
@@ -1809,7 +1899,7 @@ class MainWindow(Adw.ApplicationWindow):
             dlg.connect("response", on_response)
             dlg.present(self)
             return True
-        self._cancel_poll()
+        self._cancel_all_polls()
         self._stop_monitor()
         self.session.close()
         return False

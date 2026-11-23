@@ -165,8 +165,11 @@ wireless mouse is asleep, reads time out: move it and try again.
 - **battery**: percent from the mouse's fuel gauge, plus voltage, charging
   state, temperature and cycle count. A battery indicator sits on the preview
   card (details in the tooltip and in the Device section). It is read on
-  connect and then every 30 s on the cable or 60 s through the receiver,
-  only while the window is focused, and works over both.
+  connect and then every 60 s while the window is focused (cable and
+  receiver alike). Unfocused or minimised, a battery-only read runs every
+  5 minutes (10 minutes after 3 failures) and again on focus if the value
+  is older than 60 s. A failed read keeps the last value; after 15 minutes
+  the indicator is dimmed. Works over both the cable and the receiver.
 - **live connection**: plugging or unplugging the cable or receiver is
   detected automatically (the cable is preferred when both are present);
   unsaved edits are kept and nothing is written on its own
