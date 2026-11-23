@@ -6,9 +6,9 @@ Strumenti **non ufficiali** per il mouse **NZXT Lift Elite**, via cavo USB
 (`1e71:2129`) o tramite il ricevitore 2,4 GHz (`1e71:2101`):
 
 - **Lift Elite Control**: app grafica GTK4/libadwaita (italiano o inglese)
-  per stadi DPI, polling, lift-off, motion sync, mappatura dei tasti e
-  profili con nome, con profilo/stadio DPI attivi in tempo reale,
-  applicazione immediata opzionale e ripristino di fabbrica
+  per stadi DPI, polling, lift-off, motion sync, mappatura dei tasti,
+  profili con nome e livello di batteria, con profilo/stadio DPI attivi in
+  tempo reale, applicazione immediata opzionale e ripristino di fabbrica
 - **`liftctl`**: riga di comando con le stesse funzioni
 - **plugin CoolerControl** (opzionale): stadio DPI, polling, lift-off, motion
   sync e LED del profilo direttamente da CoolerControl
@@ -118,6 +118,7 @@ Sola lettura, non scrive nulla sul mouse, senza `sudo`:
 liftctl devices         # cosa è collegato (cavo / ricevitore)
 liftctl show            # i 5 profili del mouse
 liftctl firmware-info   # versioni del firmware
+liftctl battery         # percentuale, tensione, stato di carica (sola lettura)
 ```
 
 `show` deve elencare i cinque profili con polling, lift-off, stadi DPI e
@@ -144,6 +145,11 @@ wireless dorme le letture vanno in timeout: muovilo e riprova.
   altrimenti un disegno vettoriale incorporato.
 - **5 stadi DPI** con slider e campo numerico (50–26000, passi di 50); lo
   stadio attivo salvato nel profilo è evidenziato
+- **batteria**: percentuale dal fuel gauge del mouse, più tensione, stato
+  di carica, temperatura e numero di cicli. Un indicatore sta sulla scheda
+  dell'anteprima (i dettagli nel suggerimento e nella sezione Dispositivo).
+  Viene letto all'aggancio e poi ogni 30 s via cavo o 60 s tramite il
+  ricevitore, solo con la finestra in primo piano, e funziona su entrambi.
 - **collegamento in tempo reale**: se attacchi o stacchi il cavo o il
   ricevitore l'app se ne accorge da sola (preferisce il cavo se ci sono
   entrambi); le modifiche non salvate restano e non scrive nulla da sola
@@ -174,6 +180,11 @@ titolo mostra “Demo (mouse emulato)” e il collegamento è il percorso
 generico `/dev/hidraw-mock`. Altre schermate (elenco azioni, menu, tema
 scuro) sono nel [README in inglese](README.md#lift-elite-control-gui).
 
+![Stati dell'indicatore della batteria](docs/battery-states.png)
+
+*Indicatore della batteria: in carica, a batteria, scarica, piena e non
+ancora segnalata, nei temi chiaro e scuro.*
+
 ## liftctl (riga di comando)
 
 I profili si indicano **1–5** (come nella GUI); nella memoria del mouse e nei
@@ -187,6 +198,8 @@ liftctl show                          # tutti i profili (sola lettura)
 liftctl show --profile 1 --json       # un profilo in JSON (slot interno 0)
 liftctl devices                       # cavo / ricevitore trovati
 liftctl firmware-info                 # versioni firmware (sola lettura)
+liftctl battery                       # percentuale, tensione, stato di carica (sola lettura)
+liftctl battery --watch 300 --json    # una riga JSON ogni 5 minuti
 liftctl debug-dump --out prima.txt    # sola lettura: hex di tutte le letture note
 
 liftctl set --profile 1 --polling 1000 --liftoff 2
@@ -274,7 +287,9 @@ LED del profilo (un colore).
 Agiscono su **un** profilo, scelto nella pagina del plugin (Impostazioni →
 Plugin → NZXT Lift Elite; predefinito il profilo 1). Il plugin scrive solo se
 il valore cambia, rilegge per verificare, e *Reset* ripristina il valore letto
-all'avvio del plugin. Batteria e altri sensori non sono ancora esposti.
+all'avvio del plugin. La batteria è disponibile nella GUI e in `liftctl`;
+il plugin non la espone (le metriche di stato di CoolerControl non hanno
+un campo percentuale).
 
 Installazione manuale dal checkout (la libreria deve essere importabile dal
 Python di sistema, ad esempio installata con un pacchetto; servono `grpcio` e
@@ -331,8 +346,10 @@ se vuoi). I comandi funzionano in bash, zsh e fish.
   cavo; attraverso il ricevitore si assume lo stesso protocollo
 - **colori LED personalizzati**: vengono salvati e riletti, ma se il lampeggio
   al cambio profilo li mostri è ancora in prova
-- **batteria**: non esposta; la risposta di stato che probabilmente la
-  contiene non è decodificata con certezza
+- **unità della corrente della batteria**: percentuale, tensione, stato di
+  carica, temperatura e cicli sono mostrati; l'unità della corrente (~mA) e
+  il comportamento esatto della carica vicino al 100 % mentre è in carica
+  sono ancora da confermare (`liftctl battery --watch`)
 
 ## Test
 

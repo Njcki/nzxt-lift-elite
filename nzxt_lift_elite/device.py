@@ -57,7 +57,9 @@ from .protocol import (
     REPLY_SET_ACTIVE_PROFILE_HDR,
     REPLY_ID_WORD_HDR,
     REPLY_OK,
-    REPLY_STATUS_HDR,
+    REPLY_STATUS_PREFIX,
+    BatteryStatus,
+    parse_battery_reply,
     REPLY_UID_HDR,
     TARGET_DONGLE,
     TARGET_MOUSE,
@@ -390,6 +392,8 @@ class DeviceState:
     # Interpretation (active onboard profile) is high-confidence but still
     # waiting for a real-mouse confirmation via `liftctl debug-dump`.
     active_profile: int | None = None
+    # Decoded b0 reply (fuel gauge), or None if the read failed.
+    battery: BatteryStatus | None = None
 
 
 class LiftElite:
@@ -627,8 +631,20 @@ class LiftElite:
             return None
 
     def read_status(self) -> bytes:
-        """Raw ``b0`` status reply (not decoded; see PROTOCOL.md)."""
-        return self.transact(status_packet(), REPLY_STATUS_HDR)
+        """Raw ``b0`` status reply (battery / fuel gauge; see :meth:`read_battery`)."""
+        return self.transact(status_packet(), REPLY_STATUS_PREFIX)
+
+    def read_battery(self) -> BatteryStatus:
+        """Battery level from the read-only ``b0`` status reply.
+
+        Same command over the cable and through the receiver (the receiver
+        forwards TT=02 to the mouse; a CAM receiver capture has the same
+        23-byte reply). Takes the device lock. Returns ``available=False``
+        when the fuel gauge has no valid data yet; raises ProtocolError when
+        the mouse does not answer (e.g. asleep on the receiver).
+        """
+        with self.locked():
+            return parse_battery_reply(self.read_status())
 
     def read_uid(self) -> bytes:
         """Raw 16-byte payload of the read-only ``0x03`` device-id reply."""
@@ -719,7 +735,7 @@ class LiftElite:
             ("0b info", info_packet(), info_reply_prefix()),
             ("03 uid", uid_packet(), REPLY_UID_HDR),
             ("44 get-active-profile", read_active_profile_packet(), REPLY_GET_ACTIVE_PROFILE_HDR),
-            ("b0 status", status_packet(), REPLY_STATUS_HDR),
+            ("b0 status", status_packet(), REPLY_STATUS_PREFIX),
             ("b8 id-word", id_word_packet(), REPLY_ID_WORD_HDR),
         ]
         for i in range(5):
@@ -774,8 +790,14 @@ class LiftElite:
                 active = self.read_active_profile()
             except ProtocolError:
                 pass
+            battery = None
+            try:
+                battery = self.read_battery()
+            except ProtocolError:
+                pass
         return DeviceState(
-            info=self.info, firmware=fw, receiver_firmware=rx, profiles=profiles, active_profile=active
+            info=self.info, firmware=fw, receiver_firmware=rx, profiles=profiles, active_profile=active,
+            battery=battery,
         )
 
     # --- writes ------------------------------------------------------------

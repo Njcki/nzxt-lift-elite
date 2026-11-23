@@ -116,3 +116,27 @@
   background-color: alpha(@window_fg_color, 0.22);
 }
 .preview-grip:hover .preview-grip-bar { background-color: alpha(@accent_bg_color, 0.8); }
+
+/* battery chip in the preview card header (glyph drawn in battery.py) */
+.battery-chip {
+  border-radius: 999px;
+  padding: 2px 11px 2px 8px;
+  background-color: alpha(@window_fg_color, 0.06);
+  box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.06);
+}
+.battery-chip.charging {
+  background-color: alpha(@success_bg_color, 0.12);
+  box-shadow: inset 0 0 0 1px alpha(@success_bg_color, 0.20);
+}
+.battery-chip.low {
+  background-color: alpha(@error_bg_color, 0.10);
+  box-shadow: inset 0 0 0 1px alpha(@error_bg_color, 0.22);
+}
+.battery-chip.unknown { opacity: 0.55; }
+.battery-percent {
+  font-weight: 700;
+  font-size: 1.0em;
+  font-feature-settings: "tnum";
+}
+.battery-percent.battery-warn { color: @warning_color; }
+.battery-percent.battery-low { color: @error_color; }

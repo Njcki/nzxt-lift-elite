@@ -13,6 +13,7 @@ Esempio::
         new = p0.with_changes(polling_hz=1000, dpi_stages={2: 1000},
                               buttons={"forward": "volume-up"})
         mouse.apply_profile(new)              # scrive solo le differenze e verifica
+        print(mouse.read_battery().percent)   # batteria (comando b0, sola lettura)
 """
 
 __version__ = "0.2.0"
@@ -28,9 +29,19 @@ from .errors import (
     VerificationError,
 )
 from .profile import Profile, ProfileConfig, load_profiles_json, save_profiles_json
-from .protocol import PACKET_SIZE, POLLING_HZ, PRODUCT_ID, PRODUCT_ID_DONGLE, VENDOR_ID, VENDOR_INTERFACE, FirmwareInfo
+from .protocol import (
+    PACKET_SIZE,
+    POLLING_HZ,
+    PRODUCT_ID,
+    PRODUCT_ID_DONGLE,
+    VENDOR_ID,
+    VENDOR_INTERFACE,
+    BatteryStatus,
+    FirmwareInfo,
+)
 
 __all__ = [
+    "BatteryStatus",
     "DangerousCommandError",
     "DeviceBusyError",
     "DeviceNotFoundError",

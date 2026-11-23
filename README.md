@@ -6,9 +6,9 @@
 (`1e71:2129`) or the 2.4 GHz receiver (`1e71:2101`):
 
 - **Lift Elite Control**: a GTK4/libadwaita app (English or Italian) for DPI
-  stages, polling rate, lift-off, motion sync, button mapping and named
-  profiles, including live active profile/DPI stage, optional apply-immediately
-  and a factory reset
+  stages, polling rate, lift-off, motion sync, button mapping, named profiles
+  and battery level, including live active profile/DPI stage, optional
+  apply-immediately and a factory reset
 - **`liftctl`**: a command-line tool with the same features
 - **CoolerControl plugin** (optional): DPI stage, polling, lift-off, motion
   sync and profile LED from inside CoolerControl
@@ -136,6 +136,7 @@ Read-only, writes nothing to the mouse, no `sudo`:
 liftctl devices         # what is connected (cable / receiver)
 liftctl show            # the 5 onboard profiles
 liftctl firmware-info   # firmware versions
+liftctl battery         # percent, voltage, charging state (read-only)
 ```
 
 `show` should list the five profiles with polling rate, lift-off, DPI stages
@@ -161,6 +162,11 @@ wireless mouse is asleep, reads time out: move it and try again.
   librsvg is used when available; otherwise a built-in vector drawing.
 - **5 DPI stages** with slider and number field (50–26000, steps of 50); the
   active stage stored in the profile is highlighted
+- **battery**: percent from the mouse's fuel gauge, plus voltage, charging
+  state, temperature and cycle count. A battery indicator sits on the preview
+  card (details in the tooltip and in the Device section). It is read on
+  connect and then every 30 s on the cable or 60 s through the receiver,
+  only while the window is focused, and works over both.
 - **live connection**: plugging or unplugging the cable or receiver is
   detected automatically (the cable is preferred when both are present);
   unsaved edits are kept and nothing is written on its own
@@ -202,6 +208,11 @@ The clear icon in the header, next to re-read, resets all five profiles.*
 
 ![Lift Elite Control, dark theme](docs/screenshot-dark.png)
 
+![Battery indicator states](docs/battery-states.png)
+
+*Battery indicator: charging, on battery, low, full, and not yet reported,
+in the light and dark themes.*
+
 ## liftctl (command line)
 
 Profiles are numbered **1–5** (as in the GUI); in the mouse memory and in JSON
@@ -215,6 +226,8 @@ liftctl show                          # all profiles (read-only)
 liftctl show --profile 1 --json       # one profile as JSON (internal slot 0)
 liftctl devices                       # cable / receiver found
 liftctl firmware-info                 # firmware versions (read-only)
+liftctl battery                       # percent, voltage, charging state (read-only)
+liftctl battery --watch 300 --json    # one JSON line every 5 minutes
 liftctl debug-dump --out before.txt   # read-only hex dump of all known reads
 
 liftctl set --profile 1 --polling 1000 --liftoff 2
@@ -329,7 +342,9 @@ as a **Lift Elite** device with five "lighting" channels used as selectors:
 They act on **one** onboard profile, chosen on the plugin page (Settings →
 Plugins → NZXT Lift Elite; profile 1 by default). The plugin writes only when a
 value changes, reads it back, and *Reset* restores the value read when the
-plugin started. Battery and other sensors are not exposed yet.
+plugin started. Battery is available in the GUI and in `liftctl`; the
+plugin does not expose it (CoolerControl's status metrics have no percent
+field).
 
 Manual install from the checkout (the library must be importable by the
 system Python, e.g. installed system-wide or by a package; `grpcio` and
@@ -389,8 +404,10 @@ want). The commands above work in bash, zsh and fish.
   protocol is assumed through the receiver
 - **custom LED colours**: stored and read back, but whether the profile-change
   flash shows them is still being tested
-- **battery**: not exposed; the status reply that probably contains it is not
-  decoded with certainty
+- **battery current unit**: percent, voltage, charge state, temperature and
+  cycle count are shown; the current (~mA) unit and the exact state-of-charge
+  behaviour near 100 % while charging are still being confirmed
+  (`liftctl battery --watch`)
 
 ## Python library
 
@@ -401,6 +418,7 @@ with LiftElite.open() as mouse:          # transport="wired"/"wireless" to force
     p = mouse.read_profile(0)            # the library uses slots 0..4
     new = p.with_changes(polling_hz=1000, dpi_stages={2: 1000}, buttons={"forward": "volume-up"})
     mouse.apply_profile(new)             # writes only the differences and verifies
+    print(mouse.read_battery().percent)  # fuel-gauge % (read-only, command b0)
 ```
 
 Modules: `protocol` (packets, no I/O), `actions` (action table), `profile`

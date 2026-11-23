@@ -9,13 +9,15 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
+from datetime import datetime
 from collections.abc import Sequence
 from pathlib import Path
 
 from . import __version__
 from .actions import CATEGORIES, action_by_code, search_actions
 from .device import TRANSPORTS, LiftElite, list_devices
-from .errors import LiftEliteError, ValidationError
+from .errors import LiftEliteError, ProtocolError, ValidationError
 from .profile import Profile, dumps_profiles, load_profiles_json, select_config
 from .protocol import (
     BUTTON_NAMES,
@@ -23,6 +25,7 @@ from .protocol import (
     FACTORY_LED_COLORS,
     FACTORY_LED_NAMES,
     POLLING_HZ,
+    BatteryStatus,
     format_action,
     parse_color,
     set_active_profile_packet,
@@ -64,6 +67,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  liftctl show                       (read-only)\n"
             "  liftctl firmware-info              (read-only)\n"
+            "  liftctl battery --watch 300        (read-only: battery level every 5 minutes)\n"
             "  liftctl debug-dump                 (read-only: hex of the replies)\n"
             "  liftctl set --profile 1 --polling 1000 --liftoff 2\n"
             "  liftctl set --profile 1 --dpi 400,800,1600,3200,6400 --stage 2\n"
@@ -110,6 +114,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("firmware-info", help=_("firmware name, mode and versions (read-only, command 0b)"))
     p.add_argument("--json", action="store_true")
     p.set_defaults(handler=_cmd_firmware_info)
+
+    p = sub.add_parser("battery", help=_("battery level, voltage and charging state (read-only, command b0)"))
+    p.add_argument("--json", action="store_true", help=_("print as JSON"))
+    p.add_argument("--watch", type=float, metavar="SECONDS",
+                   help=_("read again every SECONDS and print one timestamped line per reading (Ctrl+C to stop)"))
+    p.add_argument("--count", type=int, metavar="N", help=_("with --watch: stop after N readings"))
+    p.set_defaults(handler=_cmd_battery)
 
     p = sub.add_parser(
         "debug-dump",
@@ -284,6 +295,80 @@ def _cmd_devices(args: argparse.Namespace) -> int:
             f"{info.path}  {info.usb_id}  {transport_label(info.transport)}  " + _("interface {n}", n=info.interface) + 
             f"{'  report-id 4e' if info.uses_4e_report_id else ''}"
         )
+    return 0
+
+
+CHARGE_LABELS = {
+    "charging": "charging",
+    "full": "full (cable connected)",
+    "discharging": "on battery",
+    "unknown": "unknown",
+}
+
+
+def charge_label(battery: BatteryStatus) -> str:
+    return _(CHARGE_LABELS.get(battery.charge_state_name, "unknown"))
+
+
+def _print_battery(b: BatteryStatus) -> None:
+    if not b.available:
+        print(_("Battery:      unknown (the mouse has no valid fuel-gauge reading yet)"))
+    else:
+        est = "  " + _("(estimated from the voltage)") if b.estimated else ""
+        print(_("Battery:      {pct} %", pct=b.percent) + est)
+        print(_("Voltage:      {v:.3f} V ({mv} mV)", v=b.millivolts / 1000, mv=b.millivolts))
+        print(_("Charging:     {state}", state=charge_label(b)))
+        if b.current_ma is not None:
+            print(_("Current:      {ma:+d} mA (approximate)", ma=b.current_ma))
+        if b.temperature_c is not None:
+            print(_("Temperature:  {t} °C", t=b.temperature_c))
+        if b.health_percent is not None:
+            print(_("Health:       {pct} %  ({cycles} cycles)", pct=b.health_percent, cycles=b.cycles or 0))
+    print(_("Raw b0:       {hex}", hex=b.raw.hex(" ")))
+
+
+def _battery_line(b: BatteryStatus | None, error: str | None = None) -> str:
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if b is None:
+        return f"{stamp}  " + _("no reply ({error})", error=error)
+    if not b.available:
+        return f"{stamp}  " + _("unknown") + f"  raw {b.raw.hex()}"
+    cur = f"  {b.current_ma:+d} mA" if b.current_ma is not None else ""
+    temp = f"  {b.temperature_c} °C" if b.temperature_c is not None else ""
+    return f"{stamp}  {b.percent:3d} %  {b.millivolts} mV  {charge_label(b)}{cur}{temp}  raw {b.raw.hex()}"
+
+
+def _cmd_battery(args: argparse.Namespace) -> int:
+    if args.watch is not None and args.watch <= 0:
+        raise ValidationError(_("--watch needs a positive number of seconds"))
+    with _open(args) as dev:
+        if args.watch is None:
+            b = dev.read_battery()
+            if args.json:
+                print(json.dumps(b.to_dict(), indent=2))
+            else:
+                _print_battery(b)
+            return 0
+        n = 0
+        try:
+            while True:
+                b, err = None, None
+                try:
+                    b = dev.read_battery()
+                except ProtocolError as exc:  # asleep on the receiver: keep watching
+                    err = str(exc).splitlines()[0]
+                if args.json:
+                    row = {"time": datetime.now().isoformat(timespec="seconds")}
+                    row.update(b.to_dict() if b else {"available": False, "error": err})
+                    print(json.dumps(row), flush=True)
+                else:
+                    print(_battery_line(b, err), flush=True)
+                n += 1
+                if args.count is not None and n >= args.count:
+                    break
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            pass
     return 0
 
 

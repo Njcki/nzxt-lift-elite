@@ -23,7 +23,10 @@ from .device import HidrawInfo, LiftElite
 from .protocol import (
     BUSY_PREFIX,
     CAPTURED_INFO_REPLY,
-    CAPTURED_STATUS_REPLY,
+    CHARGE_CHARGING,
+    CHARGE_DISCHARGING,
+    CHARGE_FULL,
+    LIION_CURVE,
     CMD_GET_ACTIVE_PROFILE,
     CMD_ID_WORD,
     CMD_INFO,
@@ -49,9 +52,74 @@ from .protocol import (
     TARGET_DONGLE,
     TARGET_MOUSE,
     VENDOR_ID,
+    build_status_reply,
     captured_read_reply,
     pad_packet,
 )
+
+
+def mv_for_percent(percent: int) -> int:
+    """Inverse of the Li-ion fallback curve (for realistic emulated voltages)."""
+    pts = LIION_CURVE
+    pct = max(0, min(100, percent))
+    for (v0, p0), (v1, p1) in zip(pts, pts[1:]):
+        if p0 <= pct <= p1:
+            return round(v0 + (v1 - v0) * (pct - p0) / max(1, p1 - p0))
+    return pts[-1][0]
+
+
+@dataclass
+class EmulatedBattery:
+    """Fuel-gauge state answered in the b0 reply (firmware layout).
+
+    Defaults reproduce the captured wired reply (full, cable in)."""
+
+    percent: int = 100
+    millivolts: int = 4201
+    charge_state: int = CHARGE_FULL
+    current_ma: int = 0
+    temperature_c: int = 24
+    valid: bool = True
+
+    @classmethod
+    def at(cls, percent: int, state: int = CHARGE_DISCHARGING) -> "EmulatedBattery":
+        mv = mv_for_percent(percent)
+        current = -9
+        if state == CHARGE_CHARGING:
+            mv, current = min(4200, mv + 90), 150  # charging lifts the cell voltage
+        elif state == CHARGE_FULL:
+            current = 0
+        return cls(percent=percent, millivolts=mv, charge_state=state, current_ma=current, temperature_c=27)
+
+    def reply(self) -> bytes:
+        return build_status_reply(percent=self.percent, millivolts=self.millivolts, charge_state=self.charge_state,
+                                  current_ma=self.current_ma, temperature_c=self.temperature_c, valid=self.valid)
+
+
+_STATE_WORDS = {"charging": CHARGE_CHARGING, "full": CHARGE_FULL, "battery": CHARGE_DISCHARGING,
+                "discharging": CHARGE_DISCHARGING}
+
+
+def battery_from_env(transport: str, spec: str | None = None) -> EmulatedBattery:
+    """Demo battery: ``LIFT_ELITE_MOCK_BATTERY=PCT[:charging|full|battery]`` or
+    ``unknown`` (screenshots / demos only), else a realistic default: charging
+    on the cable, on battery through the receiver."""
+    spec = os.environ.get("LIFT_ELITE_MOCK_BATTERY", "") if spec is None else spec
+    spec = spec.strip().lower()
+    if spec == "unknown":
+        b = EmulatedBattery.at(0)
+        b.valid = False
+        return b
+    if spec:
+        pct_s, _sep, word = spec.partition(":")
+        try:
+            pct = max(0, min(100, int(pct_s)))
+        except ValueError:
+            pct = 64
+        return EmulatedBattery.at(pct, _STATE_WORDS.get(word, CHARGE_DISCHARGING))
+    if transport == "wireless":
+        return EmulatedBattery.at(64, CHARGE_DISCHARGING)
+    return EmulatedBattery.at(72, CHARGE_CHARGING)
 
 
 @dataclass
@@ -62,6 +130,7 @@ class MouseEmulator:
     profiles: dict[int, bytearray] = field(default_factory=dict)
     buttons: dict[tuple[int, int], int] = field(default_factory=dict)
     active_profile: int = 0
+    battery: EmulatedBattery = field(default_factory=EmulatedBattery)
     log: list[bytes] = field(default_factory=list)
     unsafe: list[bytes] = field(default_factory=list)
     _n: int = 0
@@ -114,7 +183,7 @@ class MouseEmulator:
         if cmd == CMD_INFO:
             out.append(pad_packet(CAPTURED_INFO_REPLY))
         elif cmd == CMD_STATUS:
-            out.append(pad_packet(CAPTURED_STATUS_REPLY))
+            out.append(self.battery.reply())
         elif cmd == CMD_UID:
             # Synthetic id (not a real device serial).
             out.append(pad_packet(REPLY_UID_HDR + bytes(range(16))))
@@ -222,6 +291,8 @@ def fake_info(transport: str = "wired") -> HidrawInfo:
 
 def open_mock(transport: str = "wired", emulator: MouseEmulator | None = None, **kwargs) -> tuple[LiftElite, FakeHidraw]:
     """Return a connected :class:`LiftElite` talking to a fresh emulator."""
+    if emulator is None:
+        emulator = MouseEmulator(battery=battery_from_env(transport))
     fake = FakeHidraw(emulator)
     kwargs.setdefault("timeout", 0.5)
     dev = LiftElite(info=fake_info(transport), fd=fake.fd, **kwargs)

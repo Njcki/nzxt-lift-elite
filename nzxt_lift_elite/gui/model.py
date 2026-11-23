@@ -14,6 +14,7 @@ from pathlib import Path
 
 from ..actions import CATEGORIES, FACTORY_ACTIONS, Action, action_by_code, search_actions
 from ..device import DeviceState, LiftElite, button_changes
+from ..protocol import BatteryStatus
 from ..errors import InactiveProfileRemapError, ProtocolError, ValidationError
 from ..profile import Profile, ProfileConfig, dumps_profiles, load_profiles_json
 from ..protocol import (
@@ -99,6 +100,47 @@ def group_actions(actions: list[Action]) -> list[tuple[str, list[Action]]]:
     return [(c, by_cat[c]) for c in CATEGORIES if c in by_cat]
 
 
+CHARGE_LABELS = {
+    "charging": "Charging",
+    "full": "Full (cable connected)",
+    "discharging": "On battery",
+}
+
+
+def charge_label(b: BatteryStatus) -> str:
+    return _(CHARGE_LABELS.get(b.charge_state_name, "Unknown"))
+
+
+def _decimal(value: float, digits: int) -> str:
+    text = f"{value:.{digits}f}"
+    from .i18n import language
+
+    return text.replace(".", ",") if language() == "it" else text
+
+
+def battery_ok(b: BatteryStatus | None) -> bool:
+    return b is not None and b.available and b.percent is not None
+
+
+def battery_subtitle(b: BatteryStatus | None) -> str:
+    """One line for the Device section: ``72 % · 4.04 V · Charging``."""
+    if not battery_ok(b):
+        return _("Not available")
+    est = " " + _("(estimated)") if b.estimated else ""
+    return f"{b.percent} %{est} · {_decimal(b.millivolts / 1000, 2)} V · {charge_label(b)}"
+
+
+def battery_tooltip(b: BatteryStatus | None) -> str:
+    if not battery_ok(b):
+        return _("Battery level not available (the mouse has not reported it yet)")
+    lines = [_("Battery: {pct} %", pct=b.percent) + (" " + _("(estimated)") if b.estimated else ""),
+             _("Voltage: {v} V", v=_decimal(b.millivolts / 1000, 3)),
+             charge_label(b)]
+    if b.temperature_c is not None:
+        lines.append(_("Temperature: {t} °C", t=b.temperature_c))
+    return "\n".join(lines)
+
+
 def transport_label(transport: str | None) -> str:
     return {"wired": _("Cable"), "wireless": _("Wireless (receiver)")}.get(transport or "", "—")
 
@@ -118,6 +160,8 @@ class EditorModel:
     onboard_active_profile: int | None = None
     # «Rendi attivo»: slot to activate (0x45) at the next Applica, or None.
     pending_activation: int | None = None
+    # Last battery reading (b0), or None if never read / failed.
+    battery: BatteryStatus | None = None
 
     # --- loading
     def load_state(self, state: DeviceState, *, keep_selection: bool = True) -> None:
@@ -126,6 +170,8 @@ class EditorModel:
         self.device = {p.index: p for p in state.profiles}
         self.drafts = dict(self.device)
         self.onboard_active_profile = state.active_profile
+        if state.battery is not None:
+            self.battery = state.battery
         if first or not keep_selection or self.selected not in self.device:
             # Start on the profile the mouse is using (0x44), else profile 1.
             active = state.active_profile
@@ -144,6 +190,8 @@ class EditorModel:
         self.device = {p.index: p for p in state.profiles}
         self.drafts = dict(self.device)
         self.onboard_active_profile = state.active_profile
+        if state.battery is not None:
+            self.battery = state.battery
         kept = False
         for index, draft in kept_drafts.items():
             if index in self.drafts:
@@ -386,6 +434,8 @@ class StagePoll:
     active_profile: int | None  # internal slot from 0x44, None if 0x44 failed
     slot: int  # slot whose body was read
     stage: int  # 1-based active DPI stage of that slot
+    battery: BatteryStatus | None = None  # only when asked (with_battery) and read OK
+    battery_read: bool = False  # a battery read was attempted in this poll
 
 
 # Live poll cadence (ms). Wireless is slower: every request goes over the air.
@@ -393,6 +443,9 @@ POLL_INTERVAL_WIRED_MS = 700
 POLL_INTERVAL_WIRELESS_MS = 1000
 POLL_BACKOFF_MS = 5000  # after repeated failures (mouse asleep, busy, unplugged)
 POLL_FAILURES_BEFORE_BACKOFF = 3
+# Battery (b0) cadence inside the live poll: the fuel gauge changes slowly.
+BATTERY_POLL_WIRED_S = 30.0
+BATTERY_POLL_WIRELESS_S = 60.0
 
 
 class Session:
@@ -455,12 +508,14 @@ class Session:
         finally:
             dev.timeout, dev.retries, dev.lock_timeout = saved
 
-    def poll_active_stage(self, fallback_slot: int | None = None, *, timeout: float = 0.3) -> "StagePoll | None":
+    def poll_active_stage(self, fallback_slot: int | None = None, *, timeout: float = 0.3,
+                          with_battery: bool = False) -> "StagePoll | None":
         """Live read of the active DPI stage (after a purple-button press).
 
         Read-only: ``0x44`` (active profile) then one ``0x92`` profile read
         (byte 9 = stage, 0-based, returned 1-based). No button reads, no
-        writes. Returns None without touching the mouse when another device
+        writes. With ``with_battery`` it also reads ``b0`` (battery); a
+        failed battery read does not fail the poll. Returns None without touching the mouse when another device
         operation is running in this process (Apply, full read) or the
         device is not open (hotplug re-detects; the poll never opens it).
         Raises DeviceBusyError / ProtocolError / OSError on failure.
@@ -480,7 +535,14 @@ class Session:
                     active = None
                 slot = active if active is not None else fallback_slot
                 profile = dev.read_profile(slot, with_buttons=False)
-            return StagePoll(active_profile=active, slot=slot, stage=profile.stage)
+                battery = None
+                if with_battery:
+                    try:
+                        battery = dev.read_battery()
+                    except ProtocolError:
+                        battery = None
+            return StagePoll(active_profile=active, slot=slot, stage=profile.stage, battery=battery,
+                             battery_read=with_battery)
         finally:
             self._io.release()
 

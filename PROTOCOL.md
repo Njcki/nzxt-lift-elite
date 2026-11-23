@@ -118,9 +118,64 @@ them back. Named profiles still omit the colour, so loading one into another
 slot leaves that slot's LED unchanged. No separate LED commit command was found;
 no CAM capture of a colour *change* exists in this tree.
 
-Status `b0` (`4e 02 97 00 01 …`): not decoded. Bytes 7..8 read 0x1069..0x107b (4201..4219) across
-captures, plausibly battery millivolts, and `64` (100) appears twice, plausibly percent. Not exposed
-by any tool until confirmed (e.g. watching it drop on battery).
+## Status `b0`: battery / fuel gauge (decoded from the firmware, 2026-11-23)
+
+`OUT 4e 02 81 00 b0` → `IN 4e 02 97 00 <23 bytes>`. Read-only: the firmware
+command handler (case 0xb0) only copies RAM into the reply. Same command and the
+same 23-byte reply through the receiver (the receiver forwards TT=02 to the
+mouse). CAM sends it after every profile write.
+
+The mouse has an I2C fuel gauge. The register table the firmware polls
+(flash 0x3ba64: register, size, RAM pointer) matches the CellWise CW2217:
+0x02 VCELL, 0x04 SOC, 0x06 TEMP, 0x0E CURRENT, 0xA4 cycle count, 0xA6 SOH. The
+I2C completion callback (~0x31990) converts and stores them. Payload layout
+(offsets after `4e 02 97 00`; absolute packet byte = offset + 4; u16 are
+little-endian):
+
+| off | size | meaning | source in the firmware |
+|---|---|---|---|
+| 0 | 1 | gauge-data-valid flag (1 after the first complete gauge read, 0 after a gauge re-init) | RAM 0x20005967 |
+| 1 | 2 | design capacity, mAh (constant 320) | struct +0 |
+| 3 | 2 | **cell voltage, mV** (VCELL × 0.3125) | struct +2 |
+| 5 | 2 | current, signed, firmware-scaled (~mA, unit provisional), median of 15 samples; > 0 while charging | struct +4 |
+| 7 | 2 | full capacity, mAh (constant 320) | struct +6 |
+| 9 | 2 | remaining capacity, mAh (= capacity × SOC / 100) | struct +8 |
+| 11 | 2 | cycle count (CYCLECNT >> 4) | struct +10 |
+| 13 | 2 | **state of charge, %** (gauge SOC; capped at 99 while charging) | struct +12 |
+| 15 | 1 | state of health, % | struct +14 |
+| 17 | 1 | temperature, °C (TEMP / 2 − 40) | struct +16 |
+| 18 | 1 | **charge state**: 0 on battery, 1 charging, 2 cable in and full | struct +17 |
+| 19 | 4 | power-management word written by `b1` (never sent by this library); low half = low-battery cut-off threshold | RAM 0x200000e8 |
+
+So the percent comes from the fuel gauge itself; no voltage curve is needed.
+The charge state is set by the charger task (~0x31c2c): only while VBUS is
+present (GPIO P0.31), from the battery temperature (charging allowed below
+45 °C, reduced below 11 °C) and the current; it becomes 2 when the current
+stops and SOC is 100. Other firmware users of the same struct: the LED task
+breathes green while charging and stays green when full; the idle task powers
+the mouse off when SOC < 3 % on battery; a SOC change raises host event 0x80.
+
+Captured replies: wired `01 4001 6910 0000 4001 4001 0000 6400 6400 18 02 08004001`
+= valid, 4201 mV, 0 mA, SOC 100 %, SOH 100 %, 24 °C, state 2 (full, cable in);
+receiver `… 7b10 … 19 02 …` = 4219 mV, 25 °C, also full (the cable was plugged
+in for charging during that session).
+
+Library: `parse_battery_reply()` / `BatteryStatus` and
+`LiftElite.read_battery()` (device lock, `b0` only). The header byte after
+`4e 02 97 00` is the valid flag, so replies are matched on the 4-byte prefix
+(`REPLY_STATUS_PREFIX`); flag 0 or a voltage outside 2.8–4.5 V gives
+"battery unknown" instead of an error. If the SOC field were ever > 100 the
+percent is estimated from the voltage with a typical Li-ion curve
+(`battery_percent_from_mv`, flagged `estimated`). Still provisional until
+confirmed by watching it drop on battery (`liftctl battery --watch 300`): the
+current unit and sign convention, and the exact SOC behaviour near 100 % while
+charging.
+Tools: `liftctl battery [--json] [--watch SECONDS]`, the GUI battery indicator
+(read on connect and every 30 s on the cable / 60 s through the receiver, only
+while the window is focused). The CoolerControl plugin does not expose it: its
+status metrics are temperature, fan speed, MHz and watts only, with no percent.
+
+### Receiver
 
 Receiver (1e71:2101): same vendor interface 01 and the same framing. Commands addressed to the
 mouse (TT=02) are assumed to be forwarded over the air (not captured in this session); the library

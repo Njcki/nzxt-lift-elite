@@ -15,6 +15,7 @@ import math
 import os
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from . import i18n  # noqa: E402
 from . import diagram as vector_diagram  # noqa: E402
 from . import svgdiagram  # noqa: E402
 from .diagram import W as DIAGRAM_W, H as DIAGRAM_H  # noqa: E402
+from .battery import BatteryIndicator  # noqa: E402
 
 
 def preview_art():
@@ -49,6 +51,8 @@ def preview_art():
     return vector_diagram
 from .i18n import _  # noqa: E402
 from .model import (  # noqa: E402
+    BATTERY_POLL_WIRED_S,
+    BATTERY_POLL_WIRELESS_S,
     BUTTON_LABELS,
     POLL_BACKOFF_MS,
     POLL_FAILURES_BEFORE_BACKOFF,
@@ -62,6 +66,9 @@ from .model import (  # noqa: E402
     Session,
     action_label,
     action_search,
+    battery_ok,
+    battery_subtitle,
+    battery_tooltip,
     dpi_to_slider,
     export_profiles,
     group_actions,
@@ -477,7 +484,8 @@ class MainWindow(Adw.ApplicationWindow):
         self._poll_source = 0
         self._poll_inflight = False
         self._poll_failures = 0
-        self.connect("notify::is-active", lambda *_a: self._schedule_poll())
+        self._battery_due = 0.0  # monotonic time of the next b0 read in the live poll
+        self.connect("notify::is-active", lambda *_a: self._on_active_changed())
         self._sync_header()
         self._start_monitor()
 
@@ -587,7 +595,11 @@ class MainWindow(Adw.ApplicationWindow):
         name.add_css_class("app-title")
         self.pill = Gtk.Label(label="")
         self.pill.add_css_class("connection-pill")
+        # Battery (b0 fuel gauge): drawn glyph + percent, refreshed by the live poll.
+        self.battery = BatteryIndicator()
+        self.battery.set_tooltip_text(battery_tooltip(None))
         top.append(name)
+        top.append(self.battery)
         top.append(self.pill)
         hero.append(top)
         self.diagram = MouseDiagram(self.open_picker)
@@ -667,11 +679,12 @@ class MainWindow(Adw.ApplicationWindow):
         # device info (connection and firmware versions; no "read-only" subtitle)
         self.dev_group = dev_group = Adw.PreferencesGroup(title=_("Device"))
         self.row_conn = Adw.ActionRow(title=_("Connection"))
+        self.row_battery = Adw.ActionRow(title=_("Battery"))
         self.row_fw = Adw.ActionRow(title=_("Mouse firmware"))
         self.row_upd = Adw.ActionRow(title=_("Updater"))
         self.row_bridge = Adw.ActionRow(title=_("Bridge"))
         self.row_rx = Adw.ActionRow(title=_("Receiver firmware"))
-        for row in (self.row_conn, self.row_fw, self.row_upd, self.row_bridge, self.row_rx):
+        for row in (self.row_conn, self.row_battery, self.row_fw, self.row_upd, self.row_bridge, self.row_rx):
             row.add_css_class("property")
             dev_group.add(row)
         side.append(dev_group)
@@ -949,6 +962,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self.row_conn.set_subtitle(_("Disconnected"))
             else:
                 self.row_conn.set_subtitle(transport_label(transport) + (f" · {state.info.path}" if state else ""))
+            self._sync_battery()
             fw = state.firmware if state else None
             self.row_fw.set_subtitle(f"{fw.name} {fw.fmt(fw.app_version)} ({fw.mode_name})" if fw else "—")
             self.row_upd.set_subtitle(fw.fmt(fw.updater_version) if fw else "—")
@@ -1220,12 +1234,14 @@ class MainWindow(Adw.ApplicationWindow):
             self.device_present = True
             if self.model.loaded and self.model.any_dirty:
                 kept = self.model.adopt_state(state)
+                self._battery_due = time.monotonic() + self._battery_interval()
                 self.stack.set_visible_child_name("main")
                 self.populate()
                 if kept:
                     self.toast(_("Re-read the mouse. Unsaved changes were kept."))
             else:
                 self.model.load_state(state)
+                self._battery_due = time.monotonic() + self._battery_interval()
                 self.stack.set_visible_child_name("main")
                 self.populate()
             self.app.on_loaded(self)
@@ -1593,6 +1609,27 @@ class MainWindow(Adw.ApplicationWindow):
     # window is focused, a mouse is connected and nothing else is talking to
     # it (Apply, full read, hotplug re-read); never writes.
 
+    # --- battery ----------------------------------------------------------------------------
+    #
+    # Read with the same read-only b0 status command CAM uses after a write:
+    # once in read_state (connect / refresh) and then every 30 s (cable) or
+    # 60 s (receiver) inside the focused-only live poll, under the device lock.
+
+    def _battery_interval(self) -> float:
+        return BATTERY_POLL_WIRELESS_S if self.model.transport == "wireless" else BATTERY_POLL_WIRED_S
+
+    def _sync_battery(self, *, animate: bool = True) -> None:
+        present = self.device_present or self.session.is_mock
+        b = self.model.battery if present else None
+        self.battery.set_status(b if battery_ok(b) else None, animate=animate)
+        self.battery.set_tooltip_text(battery_tooltip(b))
+        self.row_battery.set_subtitle(battery_subtitle(b) if present else "—")
+        self.battery.set_pulse_enabled(self.is_active())
+
+    def _on_active_changed(self) -> None:
+        self.battery.set_pulse_enabled(self.is_active())
+        self._schedule_poll()
+
     def _poll_wanted(self) -> bool:
         return (
             not getattr(self.app.args, "screenshot", None)
@@ -1628,7 +1665,9 @@ class MainWindow(Adw.ApplicationWindow):
         m = self.model
         fallback = m.onboard_active_profile if m.onboard_active_profile is not None else m.selected
         timeout = 0.6 if m.transport == "wireless" else 0.3
-        run_in_thread(lambda: self.session.poll_active_stage(fallback, timeout=timeout), self._poll_done)
+        with_battery = time.monotonic() >= self._battery_due
+        run_in_thread(lambda: self.session.poll_active_stage(fallback, timeout=timeout, with_battery=with_battery),
+                      self._poll_done)
         return False
 
     def _poll_done(self, result, error) -> None:
@@ -1640,6 +1679,11 @@ class MainWindow(Adw.ApplicationWindow):
         else:
             self._poll_failures = 0
             if result is not None and self.model.loaded:
+                if result.battery_read:
+                    self._battery_due = time.monotonic() + self._battery_interval()
+                    if result.battery is not None:
+                        self.model.battery = result.battery
+                        self._sync_battery()
                 self._on_device_stage(result)
         self._schedule_poll()
 
@@ -1718,8 +1762,10 @@ class MainWindow(Adw.ApplicationWindow):
                 kept = False
                 if self.model.loaded:
                     kept = self.model.adopt_state(state)
+                    self._battery_due = time.monotonic() + self._battery_interval()
                 else:
                     self.model.load_state(state)
+                    self._battery_due = time.monotonic() + self._battery_interval()
                 self.stack.set_visible_child_name("main")
                 self.populate()
                 transport = transport_label(state.info.transport)

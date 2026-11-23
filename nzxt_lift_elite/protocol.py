@@ -117,6 +117,11 @@ REMAP_TYPE = 0x04
 REPLY_OK = bytes((0x4E, TARGET_MOUSE, 0x82, 0x00, 0x01))
 REPLY_INFO_HDR = bytes((0x4E, TARGET_MOUSE, 0x9E, 0x00))
 REPLY_STATUS_HDR = bytes((0x4E, TARGET_MOUSE, 0x97, 0x00, 0x01))
+# The 0x01 after the b0 header is not a fixed status byte: it is the
+# firmware's "fuel gauge data valid" flag (0 right after power-up, before the
+# first complete gauge read). Match only the 4-byte prefix so a 00 still
+# parses (as "battery unknown") instead of timing out.
+REPLY_STATUS_PREFIX = bytes((0x4E, TARGET_MOUSE, 0x97, 0x00))
 REPLY_UID_HDR = bytes((0x4E, TARGET_MOUSE, 0x90, 0x00))
 REPLY_ID_WORD_HDR = bytes((0x4E, TARGET_MOUSE, 0x84, 0x00))
 REPLY_GET_ACTIVE_PROFILE_HDR = bytes((0x4E, TARGET_MOUSE, 0x82, 0x00, 0x01))
@@ -728,6 +733,179 @@ def parse_info_reply(packet: bytes, target: int = TARGET_MOUSE) -> FirmwareInfo:
     )
 
 
+# --- battery / status (0xb0) -------------------------------------------------
+# Decoded from the mouse firmware (Mouse_App 1.01.0005): the firmware
+# command handler (case 0xb0) replies with 23 bytes:
+#   [0]      gauge-valid flag (RAM 0x20005967; set to 1 after a full gauge read,
+#            cleared when the gauge is re-initialised)
+#   [1..18]  battery struct (RAM 0x2000596c, 18 bytes, u16 little-endian),
+#            filled from an I2C fuel gauge whose register map matches the
+#            CellWise CW2217 (table at 0x3ba64: reg 0x02 VCELL, 0x04 SOC,
+#            0x06 TEMP, 0x0E CURRENT, 0xA4 cycle count, 0xA6 SOH):
+#              +0  design capacity mAh (constant 320)
+#              +2  cell voltage mV        (VCELL * 0.3125)
+#              +4  current, signed         (median of 15 CURRENT samples, firmware-scaled;
+#                                           > 0 while charging; unit provisional, ~mA)
+#              +6  full capacity mAh (constant 320)
+#              +8  remaining capacity mAh  (= capacity * SOC / 100)
+#              +10 cycle count             (CYCLECNT >> 4)
+#              +12 state of charge %       (gauge SOC; capped at 99 while charging)
+#              +14 state of health %
+#              +16 temperature °C (int8)   (TEMP / 2 - 40)
+#              +17 charge state            (0 = on battery, 1 = charging, 2 = cable in and full)
+#   [19..22] power-management word (RAM 0x200000e8; written by 0xb1, which this
+#            library never sends; low half is the low-battery cut-off threshold)
+# The percent therefore comes straight from the fuel gauge; no voltage curve
+# is needed. battery_percent_from_mv() is only a fallback for an out-of-range
+# SOC byte and marks the result as estimated.
+STATUS_PAYLOAD = 4  # absolute offset of the payload in the 64-byte packet
+CHARGE_DISCHARGING = 0
+CHARGE_CHARGING = 1
+CHARGE_FULL = 2
+CHARGE_STATE_NAMES = {CHARGE_DISCHARGING: "discharging", CHARGE_CHARGING: "charging", CHARGE_FULL: "full"}
+BATTERY_MV_MIN = 2800  # anything outside this window is treated as garbage
+BATTERY_MV_MAX = 4500
+
+# Typical 1-cell Li-ion/LiPo resting curve (mV, %), used only as a fallback.
+LIION_CURVE: tuple[tuple[int, int], ...] = (
+    (3300, 0), (3500, 4), (3600, 10), (3650, 18), (3700, 28), (3750, 40),
+    (3800, 50), (3900, 65), (4000, 78), (4100, 90), (4200, 100),
+)
+
+
+def battery_percent_from_mv(mv: int) -> int:
+    """Estimate the charge from the cell voltage (linear between LIION_CURVE points)."""
+    pts = LIION_CURVE
+    if mv <= pts[0][0]:
+        return 0
+    if mv >= pts[-1][0]:
+        return 100
+    for (v0, p0), (v1, p1) in zip(pts, pts[1:]):
+        if v0 <= mv <= v1:
+            return round(p0 + (p1 - p0) * (mv - v0) / (v1 - v0))
+    return 0  # pragma: no cover
+
+
+@dataclass(frozen=True)
+class BatteryStatus:
+    """Decoded ``b0`` reply. ``available`` is False when the gauge has no
+    valid data yet or the values are out of range; ``percent`` is then None."""
+
+    available: bool
+    percent: int | None
+    millivolts: int | None
+    charge_state: int | None
+    current_ma: int | None
+    temperature_c: int | None
+    health_percent: int | None
+    cycles: int | None
+    remaining_mah: int | None
+    capacity_mah: int | None
+    estimated: bool  # percent computed from millivolts (SOC byte out of range)
+    raw: bytes  # the 23 payload bytes after ``4e 02 97 00``
+
+    @property
+    def charging(self) -> bool:
+        return self.charge_state == CHARGE_CHARGING
+
+    @property
+    def external_power(self) -> bool:
+        """Cable plugged in (charging or full)."""
+        return self.charge_state in (CHARGE_CHARGING, CHARGE_FULL)
+
+    @property
+    def charge_state_name(self) -> str:
+        if self.charge_state is None:
+            return "unknown"
+        return CHARGE_STATE_NAMES.get(self.charge_state, f"unknown-{self.charge_state}")
+
+    @property
+    def volts(self) -> float | None:
+        return None if self.millivolts is None else self.millivolts / 1000
+
+    def to_dict(self) -> dict:
+        return {
+            "available": self.available,
+            "percent": self.percent,
+            "estimated": self.estimated,
+            "millivolts": self.millivolts,
+            "charging": self.charging,
+            "external_power": self.external_power,
+            "charge_state": self.charge_state_name,
+            "current_ma": self.current_ma,
+            "temperature_c": self.temperature_c,
+            "health_percent": self.health_percent,
+            "cycles": self.cycles,
+            "remaining_mah": self.remaining_mah,
+            "capacity_mah": self.capacity_mah,
+            "raw": self.raw.hex(),
+        }
+
+
+UNKNOWN_BATTERY = BatteryStatus(False, None, None, None, None, None, None, None, None, None, False, b"")
+
+
+def parse_battery_reply(packet: bytes) -> BatteryStatus:
+    """Decode a ``4e 02 97 00 …`` (``b0``) reply. Never raises for odd
+    values: returns ``available=False`` instead; raises ProtocolError only
+    when the packet is not a b0 reply at all."""
+    data = pad_packet(bytes(packet[:PACKET_SIZE]))
+    if data[:4] != REPLY_STATUS_PREFIX:
+        raise ProtocolError(f"not a status reply: {data[:4].hex()}")
+    p = data[STATUS_PAYLOAD : STATUS_PAYLOAD + 23]
+    valid = p[0] == 1
+    mv = _u16le(p, 3)
+    current = _u16le(p, 5)
+    if current >= 0x8000:
+        current -= 0x10000
+    soc = _u16le(p, 13)
+    soh = p[15]
+    temp = p[17] - 256 if p[17] >= 0x80 else p[17]
+    state = p[18]
+    sane_mv = BATTERY_MV_MIN <= mv <= BATTERY_MV_MAX
+    if not valid or not sane_mv:
+        return BatteryStatus(False, None, mv or None, state if valid else None, None, None, None, None, None,
+                             None, False, bytes(p))
+    estimated = soc > 100
+    percent = battery_percent_from_mv(mv) if estimated else soc
+    return BatteryStatus(
+        available=True,
+        percent=percent,
+        millivolts=mv,
+        charge_state=state if state in CHARGE_STATE_NAMES else None,
+        current_ma=current,
+        temperature_c=temp,
+        health_percent=soh if soh <= 100 else None,
+        cycles=_u16le(p, 11),
+        remaining_mah=_u16le(p, 9),
+        capacity_mah=_u16le(p, 7) or None,
+        estimated=estimated,
+        raw=bytes(p),
+    )
+
+
+def build_status_reply(*, percent: int = 100, millivolts: int = 4201, charge_state: int = CHARGE_FULL,
+                       current_ma: int = 0, temperature_c: int = 24, health_percent: int = 100,
+                       cycles: int = 0, valid: bool = True, capacity_mah: int = 320) -> bytes:
+    """A b0 reply in the firmware layout (for the emulator and tests)."""
+    pkt = empty_packet()
+    pkt[:4] = REPLY_STATUS_PREFIX
+    p = STATUS_PAYLOAD
+    pkt[p] = 1 if valid else 0
+    _put_u16le(pkt, p + 1, capacity_mah)
+    _put_u16le(pkt, p + 3, millivolts)
+    _put_u16le(pkt, p + 5, current_ma & 0xFFFF)
+    _put_u16le(pkt, p + 7, capacity_mah)
+    _put_u16le(pkt, p + 9, capacity_mah * percent // 100)
+    _put_u16le(pkt, p + 11, cycles)
+    _put_u16le(pkt, p + 13, percent)
+    pkt[p + 15] = health_percent
+    pkt[p + 17] = temperature_c & 0xFF
+    pkt[p + 18] = charge_state
+    pkt[p + 19 : p + 23] = bytes.fromhex("08004001")  # power word as captured
+    return bytes(pkt)
+
+
 # --- captured data (CAM, wired, used by tests and the mock device) ----------
 CAPTURED_PROFILE_0_REPLY = bytes.fromhex("4e029400010005010501900120034006800c00190f1f0001")
 CAPTURED_BODIES = {
@@ -741,7 +919,9 @@ CAPTURED_BODIES = {
 CAPTURED_INFO_REPLY = bytes.fromhex(
     "4e029e00" + b"HyperSonic".hex() + "00" * 6 + "0201" + "01010100" + "01010300" + "01010000"
 )
-# b0 status reply as captured after a profile write (meaning not decoded)
+# b0 status reply as captured after a profile write (wired CAM session):
+# gauge valid, 4201 mV, 0 mA, SOC 100 %, SOH 100 %, 24 °C, charge state 2
+# (cable in, full). See parse_battery_reply / PROTOCOL.md.
 CAPTURED_STATUS_REPLY = bytes.fromhex("4e02970001400169100000400140010000640064001802080040 01".replace(" ", ""))
 
 

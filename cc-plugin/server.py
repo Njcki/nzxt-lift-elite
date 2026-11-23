@@ -412,7 +412,7 @@ def make_servicer(core: PluginCore, stubs: dict, on_shutdown: Callable[[], None]
 
         def Status(self, request, context):
             check_device(request.device_id, context)
-            return s["status_pb2"].StatusResponse()  # no sensors (battery not decoded)
+            return s["status_pb2"].StatusResponse()  # no sensors: the status proto has no percent metric for the battery
 
         def ResetChannel(self, request, context):
             check_device(request.device_id, context)

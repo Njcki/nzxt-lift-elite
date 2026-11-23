@@ -32,6 +32,7 @@ os.environ["LIFT_ELITE_LANG"] = "it"
 os.environ["GSETTINGS_BACKEND"] = "memory"
 os.environ["GTK_A11Y"] = "none"
 os.environ.pop("LIFT_ELITE_DIAGRAM", None)
+os.environ.pop("LIFT_ELITE_MOCK_BATTERY", None)  # demo battery override (screenshots)
 
 # --- never touch a real device -------------------------------------------------
 EMPTY_SYS_HIDRAW = os.path.join(_HOME, "sys-class-hidraw")
