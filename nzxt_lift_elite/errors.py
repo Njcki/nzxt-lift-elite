@@ -27,3 +27,12 @@ class DangerousCommandError(LiftEliteError):
 
 class DeviceBusyError(LiftEliteError):
     """Another program (GUI, CLI or CoolerControl plugin) holds the device lock."""
+
+
+class InactiveProfileRemapError(LiftEliteError):
+    """Button remap refused: the target profile is not the one active on the mouse.
+
+    The firmware's 0x50 handler (remap type 04) ignores the profile byte and
+    writes the button into the *active* profile, so remapping any other
+    profile would silently change the wrong one.
+    """

@@ -166,3 +166,25 @@ class UeventAndSelectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HermeticGuardTest(unittest.TestCase):
+    """tests/__init__.py keeps the suite away from the user's mouse and settings."""
+
+    def test_real_hidraw_blocked(self):
+        import os
+
+        from nzxt_lift_elite import device
+
+        with self.assertRaises(PermissionError):
+            os.open("/dev/hidraw0", os.O_RDWR)
+        with self.assertRaises(PermissionError):
+            device.open_hidraw("/dev/hidraw0", timeout=0)
+        self.assertEqual(device.iter_lift_elite_hidraw(), [])
+
+    def test_private_home(self):
+        import os
+        import tempfile
+
+        self.assertTrue(os.environ["XDG_CONFIG_HOME"].startswith(tempfile.gettempdir()))
+        self.assertEqual(os.environ["LIFT_ELITE_LANG"], "it")

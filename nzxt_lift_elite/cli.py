@@ -25,149 +25,175 @@ from .protocol import (
     POLLING_HZ,
     format_action,
     parse_color,
+    set_active_profile_packet,
     validate_dpi_value,
     validate_stage,
 )
+from .i18n import _
 from .store import ProfileStore
 
-BUTTON_LABELS_IT = {
-    "left": "Sinistro",
-    "middle": "Centrale (rotella)",
-    "right": "Destro",
-    "forward": "Laterale avanti",
-    "back": "Laterale indietro",
-    "dpi": "Tasto DPI",
+BUTTON_LABELS = {
+    "left": "Left",
+    "middle": "Middle (wheel)",
+    "right": "Right",
+    "forward": "Side forward",
+    "back": "Side back",
+    "dpi": "DPI button",
 }
-TRANSPORT_IT = {"wired": "via cavo", "wireless": "wireless (ricevitore)"}
+TRANSPORT_LABELS = {"wired": "wired", "wireless": "wireless (receiver)"}
+
+
+def button_label(name: str) -> str:
+    return _(BUTTON_LABELS[name])
+
+
+def transport_label(transport: str) -> str:
+    return _(TRANSPORT_LABELS[transport])
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="liftctl",
-        description=(
-            "Configura un mouse NZXT Lift Elite da Linux, via cavo o tramite il ricevitore "
-            "(protocollo non ufficiale, ricavato da NZXT CAM). I profili si indicano 1..5 "
-            "(nella memoria del mouse sono gli slot 0..4). Gli stadi DPI 1..5 sono i valori "
-            "che si ciclano col tasto viola."
+        description=_(
+            "Configure an NZXT Lift Elite mouse from Linux, wired or through the receiver "
+            "(unofficial protocol, worked out from NZXT CAM). Profiles are numbered 1..5 "
+            "(slots 0..4 in the mouse's memory). DPI stages 1..5 are the values "
+            "the purple button cycles through."
         ),
-        epilog=(
-            "Esempi:\n"
-            "  liftctl show                       (sola lettura)\n"
-            "  liftctl firmware-info              (sola lettura)\n"
-            "  liftctl debug-dump                 (sola lettura: hex delle risposte)\n"
+        epilog=_(
+            "Examples:\n"
+            "  liftctl show                       (read-only)\n"
+            "  liftctl firmware-info              (read-only)\n"
+            "  liftctl debug-dump                 (read-only: hex of the replies)\n"
             "  liftctl set --profile 1 --polling 1000 --liftoff 2\n"
             "  liftctl set --profile 1 --dpi 400,800,1600,3200,6400 --stage 2\n"
             "  liftctl set --profile 1 --dpi-stage 2=1000 --motion-sync off\n"
             "  liftctl remap --profile 1 --button forward --action volume-up\n"
             "  liftctl remap --profile 1 --button dpi --action key:0x04\n"
             "  liftctl remap --profile 1 --reset\n"
+            "  liftctl activate --profile 2         (makes the profile active, command 0x45)\n"
             "  liftctl actions volume\n"
-            "  liftctl save FPS --profile 1       (profilo con nome)\n"
+            "  liftctl save FPS --profile 1       (named profile)\n"
             "  liftctl load FPS --profile 3\n"
             "  liftctl set --profile 2 --color '#ff0000'\n"
-            "  liftctl restore-led-colors         (colori LED di fabbrica)\n"
-            "  liftctl save --all tutti.json      (file)\n"
-            "  liftctl --dry-run load --all tutti.json\n"
+            "  liftctl restore-led-colors         (factory LED colours)\n"
+            "  liftctl reset-defaults --yes       (factory buttons and LED colours, all profiles)\n"
+            "  liftctl save --all all.json        (file)\n"
+            "  liftctl --dry-run load --all all.json\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"liftctl {__version__}")
-    parser.add_argument("--debug", action="store_true", help="dump esadecimale di ogni pacchetto su stderr")
+    parser.add_argument("--debug", action="store_true", help=_("hex dump of every packet on stderr"))
     parser.add_argument(
-        "--dry-run", action="store_true", help="legge dal mouse ma non scrive: mostra i pacchetti che invierebbe"
+        "--dry-run", action="store_true", help=_("reads the mouse but does not write: shows the packets it would send")
     )
-    parser.add_argument("--device", metavar="PATH", help="nodo hidraw da usare (default: rilevamento automatico)")
+    parser.add_argument("--device", metavar="PATH", help=_("hidraw node to use (default: automatic detection)"))
     parser.add_argument(
         "--transport",
         choices=TRANSPORTS,
         default="auto",
-        help="auto (cavo se presente, altrimenti ricevitore), wired o wireless",
+        help=_("auto (cable if present, otherwise receiver), wired or wireless"),
     )
     parser.add_argument("--mock", action="store_true", help=argparse.SUPPRESS)  # emulated mouse (tests/demo)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("devices", help="elenca mouse/ricevitore trovati (solo sysfs, non apre nulla)")
+    p = sub.add_parser("devices", help=_("list the mice/receivers found (sysfs only, opens nothing)"))
     p.set_defaults(handler=_cmd_devices)
 
-    p = sub.add_parser("show", aliases=["status"], help="legge e mostra i profili (sola lettura)")
-    p.add_argument("--profile", type=int, metavar="N", help="solo il profilo N (1..5)")
-    p.add_argument("--json", action="store_true", help="stampa in JSON")
-    p.add_argument("--no-buttons", action="store_true", help="non leggere la mappatura dei tasti")
+    p = sub.add_parser("show", aliases=["status"], help=_("read and show the profiles (read-only)"))
+    p.add_argument("--profile", type=int, metavar="N", help=_("only profile N (1..5)"))
+    p.add_argument("--json", action="store_true", help=_("print as JSON"))
+    p.add_argument("--no-buttons", action="store_true", help=_("do not read the button mapping"))
     p.set_defaults(handler=_cmd_show)
 
-    p = sub.add_parser("firmware-info", help="nome, modalità e versioni firmware (sola lettura, comando 0b)")
+    p = sub.add_parser("firmware-info", help=_("firmware name, mode and versions (read-only, command 0b)"))
     p.add_argument("--json", action="store_true")
     p.set_defaults(handler=_cmd_firmware_info)
 
     p = sub.add_parser(
         "debug-dump",
-        help="sola lettura: invia i comandi di lettura già noti e stampa le risposte in esadecimale",
+        help=_("read-only: send the known read commands and print the replies in hex"),
     )
-    p.add_argument("--no-buttons", action="store_true", help="non leggere la mappatura dei tasti")
+    p.add_argument("--no-buttons", action="store_true", help=_("do not read the button mapping"))
     p.add_argument(
         "--out",
         metavar="FILE",
-        help="scrive anche su FILE (utile per confrontare due dump prima/dopo il cambio profilo)",
+        help=_("also write to FILE (handy to compare two dumps before/after a profile change)"),
     )
     p.set_defaults(handler=_cmd_debug_dump)
 
-    p = sub.add_parser("set", help="modifica solo i campi indicati di un profilo (legge, cambia, scrive, verifica)")
-    p.add_argument("--profile", type=int, required=True, metavar="N", help="profilo 1..5")
-    p.add_argument("--polling", type=int, choices=sorted(POLLING_HZ.values()), help="frequenza di polling in Hz")
-    p.add_argument("--liftoff", type=int, choices=(1, 2), help="distanza di lift-off in mm")
-    p.add_argument("--dpi", metavar="LISTA", help="tutti e 5 gli stadi DPI, es. 400,800,1600,3200,6400")
+    p = sub.add_parser("set", help=_("change only the given fields of a profile (read, change, write, verify)"))
+    p.add_argument("--profile", type=int, required=True, metavar="N", help=_("profile 1..5"))
+    p.add_argument("--polling", type=int, choices=sorted(POLLING_HZ.values()), help=_("polling rate in Hz"))
+    p.add_argument("--liftoff", type=int, choices=(1, 2), help=_("lift-off distance in mm"))
+    p.add_argument("--dpi", metavar=_("LIST"), help=_("all 5 DPI stages, e.g. 400,800,1600,3200,6400"))
     p.add_argument(
-        "--dpi-stage", action="append", default=[], metavar="K=VALORE", help="cambia solo lo stadio K (ripetibile)"
+        "--dpi-stage", action="append", default=[], metavar=_("K=VALUE"), help=_("change only stage K (repeatable)")
     )
-    p.add_argument("--stage", type=int, metavar="K", help="stadio DPI attivo salvato nel profilo (1..5)")
+    p.add_argument("--stage", type=int, metavar="K", help=_("active DPI stage stored in the profile (1..5)"))
     p.add_argument("--motion-sync", choices=("on", "off"))
-    p.add_argument("--color", metavar="#RRGGBB", help="colore del LED del profilo (RGB565, approssimato)")
+    p.add_argument("--color", metavar="#RRGGBB", help=_("profile LED colour (RGB565, approximated)"))
     p.set_defaults(handler=_cmd_set)
 
-    p = sub.add_parser("remap", help="assegna un'azione a un tasto di un profilo")
-    p.add_argument("--profile", type=int, required=True, metavar="N", help="profilo 1..5")
-    p.add_argument("--button", choices=BUTTON_NAMES, help="tasto")
-    p.add_argument("--action", help="azione, es. volume-up, left-click, a, f5, key:0x04 (vedi `liftctl actions`)")
-    p.add_argument("--reset", action="store_true", help="ripristina i 6 tasti di fabbrica del profilo")
+    p = sub.add_parser("remap", help=_("assign an action to a button of a profile"))
+    p.add_argument("--profile", type=int, required=True, metavar="N", help=_("profile 1..5"))
+    p.add_argument("--button", choices=BUTTON_NAMES, help=_("button"))
+    p.add_argument("--action", help=_("action, e.g. volume-up, left-click, a, f5, key:0x04 (see `liftctl actions`)"))
+    p.add_argument("--reset", action="store_true", help=_("restore the profile's 6 factory buttons"))
     p.add_argument(
-        "--allow-unknown-code", action="store_true", help="permette key:0xNN fuori dalla tabella nota"
+        "--allow-unknown-code", action="store_true", help=_("allow key:0xNN outside the known table")
     )
     p.set_defaults(handler=_cmd_remap)
 
-    p = sub.add_parser("actions", help="elenca le azioni assegnabili ai tasti")
-    p.add_argument("query", nargs="?", default="", help="filtro (nome, etichetta o codice)")
+    p = sub.add_parser(
+        "activate",
+        help=_("make a profile active on the mouse (command 0x45, like a long press of the purple button)"),
+    )
+    p.add_argument("--profile", type=int, required=True, metavar="N", help=_("profile 1..5"))
+    p.set_defaults(handler=_cmd_activate)
+
+    p = sub.add_parser("actions", help=_("list the actions that can be assigned to buttons"))
+    p.add_argument("query", nargs="?", default="", help=_("filter (name, label or code)"))
     p.add_argument("--category", choices=CATEGORIES)
     p.set_defaults(handler=_cmd_actions)
 
     p = sub.add_parser(
         "save",
-        help="salva profili: NOME = profilo con nome in ~/.config/nzxt-lift-elite/profiles, FILE.json = file",
+        help=_("save profiles: NAME = named profile in ~/.config/nzxt-lift-elite/profiles, FILE.json = file"),
     )
-    p.add_argument("target", metavar="NOME|FILE.json")
+    p.add_argument("target", metavar=_("NAME|FILE.json"))
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--profile", type=int, metavar="N")
-    g.add_argument("--all", action="store_true", help="tutti e 5 i profili (solo file)")
-    p.add_argument("--force", action="store_true", help="sovrascrive un profilo con nome esistente")
+    g.add_argument("--all", action="store_true", help=_("all 5 profiles (file only)"))
+    p.add_argument("--force", action="store_true", help=_("overwrite an existing named profile"))
     p.set_defaults(handler=_cmd_save)
 
-    p = sub.add_parser("load", help="carica un profilo con nome o un file JSON nel mouse (verifica dopo la scrittura)")
-    p.add_argument("target", metavar="NOME|FILE.json")
+    p = sub.add_parser("load", help=_("load a named profile or a JSON file into the mouse (verified after writing)"))
+    p.add_argument("target", metavar=_("NAME|FILE.json"))
     g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--profile", type=int, metavar="N", help="profilo di destinazione 1..5")
-    g.add_argument("--all", action="store_true", help="tutti e 5 i profili del file")
+    g.add_argument("--profile", type=int, metavar="N", help=_("target profile 1..5"))
+    g.add_argument("--all", action="store_true", help=_("all 5 profiles of the file"))
     p.set_defaults(handler=_cmd_load)
 
     p = sub.add_parser(
         "restore-led-colors",
-        help="ripristina i colori LED di fabbrica (solo quel campo, poi rilegge)",
+        help=_("restore the factory LED colours (only that field, then read back)"),
     )
-    p.add_argument("--profile", type=int, metavar="N", help="solo il profilo N (1..5); default: tutti e 5")
+    p.add_argument("--profile", type=int, metavar="N", help=_("only profile N (1..5); default: all 5"))
     p.set_defaults(handler=_cmd_restore_led_colors)
 
-    p = sub.add_parser("profiles", help="elenca i profili con nome salvati")
+    p = sub.add_parser(
+        "reset-defaults",
+        help=_("restore all 5 profiles to the known factory defaults (buttons and LED colours), with a backup first"),
+    )
+    p.add_argument("--yes", "-y", action="store_true", help=_("do not ask for confirmation"))
+    p.set_defaults(handler=_cmd_reset_defaults)
+
+    p = sub.add_parser("profiles", help=_("list the saved named profiles"))
     p.set_defaults(handler=_cmd_profiles)
 
-    p = sub.add_parser("delete", help="elimina un profilo con nome")
+    p = sub.add_parser("delete", help=_("delete a named profile"))
     p.add_argument("name")
     p.set_defaults(handler=_cmd_delete)
     return parser
@@ -195,7 +221,7 @@ def _is_file_target(target: str) -> bool:
 def parse_cli_profile(number: int) -> int:
     """User-facing profile 1..5 → internal slot 0..4."""
     if isinstance(number, bool) or not isinstance(number, int) or not (1 <= number <= 5):
-        raise ValidationError(f"il profilo deve essere 1..5, ricevuto {number}")
+        raise ValidationError(_("the profile must be 1..5, got {number}", number=number))
     return number - 1
 
 
@@ -205,7 +231,7 @@ def display_profile(index: int) -> int:
 
 
 def _print_profile(profile: Profile, heading: str | None = None, transport: str | None = None) -> None:
-    print(heading or f"Profilo {display_profile(profile.index)}  (LED {profile.color_rgb_hex})")
+    print(heading or _("Profile {n}  (LED {color})", n=display_profile(profile.index), color=profile.color_rgb_hex))
     print(f"  Polling:      {profile.polling_hz} Hz")
     warn = profile.polling_warning(transport)
     if warn:
@@ -214,17 +240,17 @@ def _print_profile(profile: Profile, heading: str | None = None, transport: str 
     stages = []
     for i, value in enumerate(profile.dpi_stages, start=1):
         stages.append(f"[{value}]" if i == profile.stage else str(value))
-    print(f"  Stadi DPI:    {' '.join(stages)}   (attivo: {profile.stage})")
+    print(_("  DPI stages:   {stages}   (active: {stage})", stages=" ".join(stages), stage=profile.stage))
     print(f"  Motion sync:  {'on' if profile.motion_sync else 'off'}")
     if profile.buttons is not None:
-        print("  Tasti:")
+        print(_("  Buttons:"))
         for name in BUTTON_NAMES:
             code = profile.buttons.get(name)
             if code is None:
                 continue
             act = action_by_code(code)
-            label = act.label if act else "codice sconosciuto"
-            print(f"    {BUTTON_LABELS_IT[name]:<20} {format_action(code):<18} ({label}, 0x{code:02x})")
+            label = _(act.label) if act else _("unknown code")
+            print(f"    {button_label(name):<20} {format_action(code):<18} ({label}, 0x{code:02x})")
 
 
 def _snapshot_backup(dev: LiftElite, store: ProfileStore, indexes: list[int]) -> Path | None:
@@ -234,7 +260,7 @@ def _snapshot_backup(dev: LiftElite, store: ProfileStore, indexes: list[int]) ->
         current = [dev.read_profile(i) for i in indexes]
         return store.backup(current)
     except (LiftEliteError, OSError) as exc:
-        print(f"avviso: backup non riuscito ({exc})", file=sys.stderr)
+        print(_("warning: backup failed ({error})", error=exc), file=sys.stderr)
         return None
 
 
@@ -242,7 +268,7 @@ def _remember(store: ProfileStore, profile: Profile) -> None:
     try:
         store.remember_slot(profile)
     except OSError as exc:
-        print(f"avviso: impossibile salvare lo stato dello slot ({exc})", file=sys.stderr)
+        print(_("warning: could not save the slot state ({error})", error=exc), file=sys.stderr)
 
 
 # --- commands ------------------------------------------------------------------
@@ -251,11 +277,11 @@ def _remember(store: ProfileStore, profile: Profile) -> None:
 def _cmd_devices(args: argparse.Namespace) -> int:
     found = list_devices()
     if not found:
-        print("Nessun NZXT Lift Elite trovato (né via cavo 1e71:2129 né ricevitore 1e71:2101).")
+        print(_("No NZXT Lift Elite found (neither wired 1e71:2129 nor receiver 1e71:2101)."))
         return 1
     for info in found:
         print(
-            f"{info.path}  {info.usb_id}  {TRANSPORT_IT[info.transport]}  interfaccia {info.interface}"
+            f"{info.path}  {info.usb_id}  {transport_label(info.transport)}  " + _("interface {n}", n=info.interface) + 
             f"{'  report-id 4e' if info.uses_4e_report_id else ''}"
         )
     return 0
@@ -268,18 +294,18 @@ def _cmd_firmware_info(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps({"connection": dev.transport, "mouse": fw.to_dict(), "receiver": rx.to_dict() if rx else None}, indent=2))
         return 0
-    print(f"Collegamento:    {TRANSPORT_IT[dev.transport]} ({dev.info.path})")
+    print(_("Connection:      {transport} ({path})", transport=transport_label(dev.transport), path=dev.info.path))
     _print_fw("Mouse", fw)
     if rx:
-        _print_fw("Ricevitore", rx)
+        _print_fw(_("Receiver"), rx)
     return 0
 
 
 def _print_fw(title: str, fw) -> None:
     print(f"{title}:")
-    print(f"  Nome:          {fw.name}")
-    print(f"  Modalità:      {fw.mode_name}")
-    print(f"  Applicazione:  {fw.fmt(fw.app_version)}")
+    print(_("  Name:          {v}", v=fw.name))
+    print(_("  Mode:          {v}", v=fw.mode_name))
+    print(_("  Application:   {v}", v=fw.fmt(fw.app_version)))
     print(f"  Bridge:        {fw.fmt(fw.bridge_version)}")
     print(f"  Updater:       {fw.fmt(fw.updater_version)}")
 
@@ -304,20 +330,20 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if args.json:
         sys.stdout.write(dumps_profiles(profiles))
         return 0
-    head = f"NZXT Lift Elite {TRANSPORT_IT[dev.transport]} ({dev.info.path})"
+    head = f"NZXT Lift Elite {transport_label(dev.transport)} ({dev.info.path})"
     if fw:
         head += f", firmware {fw.fmt(fw.app_version)}"
     print(head)
     if active is not None:
-        print(
-            f"Profilo attivo (sperimentale, comando 0x44): {active + 1} "
-            f"(slot interno {active})"
-        )
+        print(_("Active profile on the mouse: {n}  (command 0x44, internal slot {slot})", n=display_profile(active), slot=active))
     print()
     for i, profile in enumerate(profiles):
         if i:
             print()
-        _print_profile(profile, transport=dev.transport)
+        heading = None
+        if active is not None and profile.index == active:
+            heading = _("Profile {n}  (LED {color})  ← active on the mouse", n=display_profile(profile.index), color=profile.color_rgb_hex)
+        _print_profile(profile, heading=heading, transport=dev.transport)
     return 0
 
 
@@ -350,17 +376,17 @@ def _cmd_debug_dump(args: argparse.Namespace) -> int:
         print(s)
 
     with _open(args) as dev:
-        emit("# liftctl debug-dump — sola lettura, nessun comando di scrittura")
-        emit(f"# dispositivo: {dev.info.path} ({TRANSPORT_IT[dev.transport]})")
-        emit("# uso: esegui, tieni premuto a lungo il tasto viola per cambiare profilo,")
-        emit("#      esegui di nuovo e confronta i due output (in particolare la riga 44).")
+        emit(_("# liftctl debug-dump — read-only, no write commands"))
+        emit(_("# device: {path} ({transport})", path=dev.info.path, transport=transport_label(dev.transport)))
+        emit(_("# usage: run it, long-press the purple button to change profile,"))
+        emit(_("#        run it again and compare the two outputs (especially line 44)."))
         emit()
         rows = dev.debug_dump(with_buttons=not args.no_buttons)
 
     for label, request, reply, error in rows:
         cmd = command_of(request)
         if cmd is None or cmd not in READ_ONLY_COMMANDS or cmd in DANGEROUS_COMMANDS or cmd == CMD_SET_ACTIVE_PROFILE:
-            raise RuntimeError(f"debug-dump ha tentato un comando non sicuro: {request[:8].hex()}")
+            raise RuntimeError(_("debug-dump tried an unsafe command: {hex}", hex=request[:8].hex()))
         emit(f"## {label}")
         emit(f"OUT {_fmt_dump_packet(request)}")
         if error:
@@ -370,19 +396,19 @@ def _cmd_debug_dump(args: argparse.Namespace) -> int:
             if label.startswith("44 ") and reply is not None:
                 try:
                     slot = parse_active_profile_reply(reply)
-                    emit(f"# interpretazione sperimentale: slot interno {slot} = profilo utente {slot + 1}")
+                    emit(_("# experimental reading: internal slot {slot} = user profile {n}", slot=slot, n=slot + 1))
                 except Exception:
                     pass
         emit()
 
     sent = [command_of(req) for _, req, _, _ in rows]
     if any(c is None or c not in READ_ONLY_COMMANDS for c in sent):
-        raise RuntimeError("debug-dump: comando non di sola lettura")
-    emit(f"# comandi inviati: {len(rows)} (tutti di sola lettura)")
+        raise RuntimeError(_("debug-dump: command is not read-only"))
+    emit(_("# commands sent: {n} (all read-only)", n=len(rows)))
 
     if args.out:
         Path(args.out).write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print(f"# scritto anche in {args.out}")
+        print(_("# also written to {path}", path=args.out))
     return 0
 
 
@@ -390,7 +416,7 @@ def _parse_dpi_list(text: str) -> list[int]:
     try:
         values = [int(part.strip()) for part in text.split(",") if part.strip()]
     except ValueError as exc:
-        raise ValidationError(f"--dpi: lista non valida {text!r}") from exc
+        raise ValidationError(_("--dpi: invalid list {value}", value=repr(text))) from exc
     return values
 
 
@@ -398,12 +424,12 @@ def _parse_stage_overrides(items: list[str]) -> dict[int, int]:
     out: dict[int, int] = {}
     for item in items:
         if "=" not in item:
-            raise ValidationError(f"--dpi-stage vuole K=VALORE, trovato {item!r}")
+            raise ValidationError(_("--dpi-stage wants K=VALUE, got {value}", value=repr(item)))
         k, v = item.split("=", 1)
         try:
             stage, value = int(k), int(v)
         except ValueError as exc:
-            raise ValidationError(f"--dpi-stage non valido: {item!r}") from exc
+            raise ValidationError(_("invalid --dpi-stage: {value}", value=repr(item))) from exc
         validate_stage(stage)
         out[stage] = validate_dpi_value(value)
     return out
@@ -416,7 +442,7 @@ def _cmd_set(args: argparse.Namespace) -> int:
     color = parse_color(args.color) if args.color else None
     motion = None if args.motion_sync is None else args.motion_sync == "on"
     if all(v is None for v in (args.polling, args.liftoff, dpi, args.stage, motion, color)) and not overrides:
-        raise ValidationError("niente da cambiare: indica almeno un'opzione (--polling, --dpi, …)")
+        raise ValidationError(_("nothing to change: give at least one option (--polling, --dpi, …)"))
     store = ProfileStore()
     with _open(args) as dev:
         current = dev.read_profile(slot)
@@ -430,11 +456,11 @@ def _cmd_set(args: argparse.Namespace) -> int:
             color=color,
         )
         if target.known_body() == current.known_body():
-            print("Il profilo ha già questi valori: nessuna scrittura.")
+            print(_("The profile already has these values: nothing written."))
             _print_profile(current, transport=dev.transport)
             return 0
         if args.dry_run:
-            _print_profile(target, heading=f"Profilo {display_profile(slot)} (previsto, non scritto)", transport=dev.transport)
+            _print_profile(target, heading=_("Profile {n} (planned, not written)", n=display_profile(slot)), transport=dev.transport)
             dev.apply_profile(target, current=current)
             return 0
         backup = _snapshot_backup(dev, store, [slot])
@@ -442,9 +468,9 @@ def _cmd_set(args: argparse.Namespace) -> int:
     _remember(store, written)
     warn = written.polling_warning(dev.transport)
     _print_profile(written, transport=dev.transport)
-    print("\nScrittura verificata (riletta dal mouse)." + (f" Backup: {backup}" if backup else ""))
+    print("\n" + _("Write verified (read back from the mouse).") + (f" Backup: {backup}" if backup else ""))
     if warn and args.polling:
-        print(f"Nota: {warn}", file=sys.stderr)
+        print(_("Note: {text}", text=warn), file=sys.stderr)
     return 0
 
 
@@ -457,8 +483,8 @@ def _cmd_restore_led_colors(args: argparse.Namespace) -> int:
             for i in indexes:
                 want = FACTORY_LED_COLORS[i]
                 cur = current[i]
-                state = "invariato" if cur.color == want else f"{cur.color_rgb_hex} → {FACTORY_LED_APPROX_HEX[i]}"
-                print(f"Profilo {display_profile(i)}  {FACTORY_LED_NAMES[i]} {FACTORY_LED_APPROX_HEX[i]}  ({want.hex()})  [{state}]")
+                state = _("unchanged") if cur.color == want else f"{cur.color_rgb_hex} → {FACTORY_LED_APPROX_HEX[i]}"
+                print(_("Profile {n}  {name} {hex}  ({raw})  [{state}]", n=display_profile(i), name=_(FACTORY_LED_NAMES[i]), hex=FACTORY_LED_APPROX_HEX[i], raw=want.hex(), state=state))
             dev.restore_factory_led_colors(indexes)
             return 0
         backup = _snapshot_backup(dev, store, indexes)
@@ -467,25 +493,72 @@ def _cmd_restore_led_colors(args: argparse.Namespace) -> int:
         _remember(store, p)
         want = FACTORY_LED_COLORS[p.index]
         already = current[p.index].color == want
-        verb = "già di fabbrica" if already else "ripristinato"
+        verb = _("already factory") if already else _("restored")
         print(
-            f"Profilo {display_profile(p.index)}  {FACTORY_LED_NAMES[p.index]} "
-            f"{p.color_rgb_hex}  ({p.color.hex()})  {verb}"
+            _("Profile {n}  {name} {hex}  ({raw})  {verb}", n=display_profile(p.index), name=_(FACTORY_LED_NAMES[p.index]),
+              hex=p.color_rgb_hex, raw=p.color.hex(), verb=verb)
         )
         if p.color != want:
             raise ValidationError(
-                f"profilo {display_profile(p.index)}: letto {p.color.hex()}, atteso {want.hex()}"
+                _("profile {n}: read {got}, expected {want}", n=display_profile(p.index), got=p.color.hex(), want=want.hex())
             )
-    print("\nColori LED riletti dal mouse." + (f" Backup: {backup}" if backup else ""))
+    print("\n" + _("LED colours read back from the mouse.") + (f" Backup: {backup}" if backup else ""))
+    return 0
+
+
+def reset_summary() -> str:
+    """What `reset-defaults` / «Reset everything» restores (firmware default table)."""
+    return _("Every profile gets the factory buttons and LED colour (Blue, Red, Green, Yellow, Purple), "
+             "DPI stages 400/800/1600/3200/6400 with stage N active on profile N, 1000 Hz polling, "
+             "1 mm lift-off and motion sync on (values from the mouse firmware's default profile table).")
+
+
+def _confirm(question: str) -> bool:
+    if not sys.stdin.isatty():
+        return False
+    try:
+        answer = input(question + " [" + _("y/N") + "] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes", "s", "si", "sì"}
+
+
+def _cmd_reset_defaults(args: argparse.Namespace) -> int:
+    """Factory reset through the normal verified writes plus 0x45 only."""
+    print(_("Reset all 5 profiles to the factory defaults."))
+    print(reset_summary())
+    if not args.yes and not args.dry_run:
+        if not sys.stdin.isatty():
+            raise ValidationError(_("reset-defaults changes all 5 profiles: add --yes to confirm"))
+        if not _confirm(_("Continue?")):
+            print(_("Cancelled: nothing was written."))
+            return 1
+    store = ProfileStore()
+
+    def progress(index: int, profile: Profile) -> None:
+        state = _("verified") if not args.dry_run else "dry-run"
+        print(_("Profile {n}  LED {name}, stage {stage} active ({dpi} DPI), {hz} Hz, lift-off {mm} mm, "
+                "motion sync {ms}, factory buttons  [{state}]", n=display_profile(index),
+                name=_(FACTORY_LED_NAMES[index]), stage=profile.stage, dpi=profile.dpi[profile.stage - 1],
+                hz=profile.polling_hz, mm=profile.liftoff, ms=_("on") if profile.motion_sync else _("off"), state=state))
+
+    with _open(args) as dev:
+        result = dev.reset_defaults(backup=lambda profiles: store.backup(profiles, reason="reset"), progress=progress)
+    if not args.dry_run:
+        for p in result.results:
+            _remember(store, p)
+    print(_("Active profile restored: {n}", n=display_profile(result.active)))
+    if result.backup:
+        print(_("Backup: {path}", path=result.backup))
     return 0
 
 
 def _cmd_remap(args: argparse.Namespace) -> int:
     slot = parse_cli_profile(args.profile)
     if args.reset == bool(args.button or args.action):
-        raise ValidationError("usa --button e --action insieme, oppure solo --reset")
+        raise ValidationError(_("use --button and --action together, or only --reset"))
     if not args.reset and not (args.button and args.action):
-        raise ValidationError("servono sia --button sia --action")
+        raise ValidationError(_("both --button and --action are needed"))
     store = ProfileStore()
     with _open(args) as dev:
         current = dev.read_profile(slot)
@@ -495,28 +568,51 @@ def _cmd_remap(args: argparse.Namespace) -> int:
             target_buttons = {args.button: args.action}
         target = current.with_changes(buttons=target_buttons, allow_unknown_actions=args.allow_unknown_code)
         if target.buttons == current.buttons:
-            print("I tasti hanno già questa mappatura: nessuna scrittura.")
+            print(_("The buttons already have this mapping: nothing written."))
             return 0
         if not args.dry_run:
             backup = _snapshot_backup(dev, store, [slot])
         written = dev.apply_profile(target, current=current)
     if args.dry_run:
-        print("(dry-run: nessun pacchetto di scrittura inviato)")
+        print(_("(dry-run: no write packet sent)"))
         return 0
     _remember(store, written)
     _print_profile(written, transport=dev.transport)
-    print("\nMappatura verificata (riletta dal mouse)." + (f" Backup: {backup}" if backup else ""))
+    print("\n" + _("Mapping verified (read back from the mouse).") + (f" Backup: {backup}" if backup else ""))
+    return 0
+
+
+def _cmd_activate(args: argparse.Namespace) -> int:
+    """Send only ``4e 02 82 00 45 PP`` (between two 0x44 reads)."""
+    slot = parse_cli_profile(args.profile)
+    with _open(args) as dev:
+        before = dev.read_active_profile()
+        print(_("Active profile before: {n}  (0x44, internal slot {slot})", n=display_profile(before), slot=before))
+        if before == slot:
+            print(_("Profile {n} is already active: no command sent.", n=args.profile))
+            return 0
+        packet = set_active_profile_packet(slot)
+        print(_("Sending:   {hex}  (0x45, internal slot {slot})", hex=packet[:6].hex(" "), slot=slot))
+        result = dev.activate_profile(slot)
+    if dev.dry_run:
+        print(_("(dry-run: 0x45 not sent)"))
+        return 0
+    if result.reply is not None:
+        print(_("Reply:     {hex}", hex=result.reply[:5].hex(" ")))
+    print(_("Active profile after: {n}  (read back with 0x44) — verified.", n=display_profile(result.after)))
+    if result.refreshed is not None:
+        print(_("Profile settings re-sent unchanged (0x93) and read back, so the mouse applies them."))
     return 0
 
 
 def _cmd_actions(args: argparse.Namespace) -> int:
     results = search_actions(args.query, args.category)
     if not results:
-        print("Nessuna azione trovata.")
+        print(_("No action found."))
         return 1
     for act in results:
-        aliases = f"  (anche: {', '.join(act.aliases)})" if act.aliases else ""
-        print(f"0x{act.code:02x}  {act.name:<24} {act.label:<26} [{act.category}]{aliases}")
+        aliases = _("  (also: {aliases})", aliases=", ".join(act.aliases)) if act.aliases else ""
+        print(f"0x{act.code:02x}  {act.name:<24} {_(act.label):<26} [{act.category}]{aliases}")
     return 0
 
 
@@ -524,7 +620,7 @@ def _cmd_save(args: argparse.Namespace) -> int:
     store = ProfileStore()
     is_file = _is_file_target(args.target)
     if args.all and not is_file:
-        raise ValidationError("--all salva in un file: usa un nome che finisce con .json")
+        raise ValidationError(_("--all saves to a file: use a name ending in .json"))
     with _open(args) as dev:
         if args.all:
             profiles = dev.read_all_profiles()
@@ -534,10 +630,10 @@ def _cmd_save(args: argparse.Namespace) -> int:
     if is_file:
         path = Path(args.target)
         path.write_text(dumps_profiles(profiles), encoding="utf-8")
-        print(f"Salvati {len(profiles)} profili in {path}")
+        print(_("Saved {n} profiles to {path}", n=len(profiles), path=path))
     else:
         path = store.save_named(args.target, profiles[0], overwrite=args.force or not store.path_for(args.target).exists())
-        print(f"Profilo {display_profile(profiles[0].index)} salvato come {args.target!r} in {path}")
+        print(_("Profile {n} saved as {name} in {path}", n=display_profile(profiles[0].index), name=repr(args.target), path=path))
     return 0
 
 
@@ -547,7 +643,7 @@ def _cmd_load(args: argparse.Namespace) -> int:
         configs = load_profiles_json(args.target)
     else:
         if args.all:
-            raise ValidationError("--all carica un file .json, non un profilo con nome")
+            raise ValidationError(_("--all loads a .json file, not a named profile"))
         configs = [store.load_named(args.target)]
     slot = None if args.profile is None else parse_cli_profile(args.profile)
     selected = select_config(configs, profile_index=slot, require_all=args.all)
@@ -558,13 +654,13 @@ def _cmd_load(args: argparse.Namespace) -> int:
         for index, config in selected:
             results.append(dev.apply_config(index, config))
     if args.dry_run:
-        print("(dry-run: nessun pacchetto di scrittura inviato)")
+        print(_("(dry-run: no write packet sent)"))
         return 0
     for profile in results:
         _remember(store, profile)
         _print_profile(profile, transport=dev.transport)
         print()
-    print(f"Caricamento verificato ({len(results)} profili)." + (f" Backup: {backup}" if backup else ""))
+    print(_("Load verified ({n} profiles).", n=len(results)) + (f" Backup: {backup}" if backup else ""))
     return 0
 
 
@@ -572,7 +668,7 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
     store = ProfileStore()
     items = store.list_named()
     if not items:
-        print(f"Nessun profilo con nome in {store.profiles_dir}")
+        print(_("No named profiles in {path}", path=store.profiles_dir))
         return 0
     for item in items:
         c = item.config
@@ -583,7 +679,7 @@ def _cmd_profiles(args: argparse.Namespace) -> int:
 
 def _cmd_delete(args: argparse.Namespace) -> int:
     ProfileStore().delete_named(args.name)
-    print(f"Profilo {args.name!r} eliminato.")
+    print(_("Profile {name} deleted.", name=repr(args.name)))
     return 0
 
 
@@ -599,10 +695,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             pass
         return 0
     except KeyboardInterrupt:
-        print("Interrotto.", file=sys.stderr)
+        print(_("Interrupted."), file=sys.stderr)
         return 130
     except (LiftEliteError, OSError) as exc:
-        print(f"errore: {exc}", file=sys.stderr)
+        print(_("error: {error}", error=exc), file=sys.stderr)
         return 1
 
 

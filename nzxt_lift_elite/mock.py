@@ -29,6 +29,7 @@ from .protocol import (
     CMD_INFO,
     CMD_READ_BUTTON,
     CMD_READ_PROFILE,
+    CMD_SET_ACTIVE_PROFILE,
     CMD_STATUS,
     CMD_UID,
     CMD_WRITE_BUTTON,
@@ -42,6 +43,7 @@ from .protocol import (
     REPLY_OK,
     REPLY_READ_BUTTON_HDR,
     REPLY_READ_PROFILE_HDR,
+    REPLY_SET_ACTIVE_PROFILE_HDR,
     REPLY_UID_HDR,
     SAFE_COMMANDS,
     TARGET_DONGLE,
@@ -72,12 +74,27 @@ class MouseEmulator:
 
     @property
     def writes(self) -> list[bytes]:
-        return [p for p in self.log if p[4] in (CMD_WRITE_PROFILE, CMD_WRITE_BUTTON)]
+        return [p for p in self.log if p[4] in (CMD_WRITE_PROFILE, CMD_WRITE_BUTTON, CMD_SET_ACTIVE_PROFILE)]
+
+    def press_dpi_button(self) -> int:
+        """Simulate a short press of the purple button: next DPI stage of the
+        active profile (byte 9, 0-based, wraps at byte 8). Returns the new
+        0-based stage. Like the firmware, nothing is sent to the host."""
+        body = self.profiles[self.active_profile]
+        count = body[8] or 1
+        body[9] = (body[9] + 1) % count
+        return body[9]
+
+    def long_press_dpi_button(self) -> int:
+        """Simulate a long press of the purple button: next onboard profile
+        (wraps 5 -> 1). Returns the new internal slot. Nothing is sent."""
+        self.active_profile = (self.active_profile + 1) % 5
+        return self.active_profile
 
     def handle(self, packet: bytes) -> list[bytes]:
         pkt = pad_packet(packet[:PACKET_SIZE])
         self.log.append(pkt)
-        if pkt[0] != 0x4E or pkt[4] not in SAFE_COMMANDS:
+        if pkt[0] != 0x4E or pkt[4] not in SAFE_COMMANDS | {CMD_SET_ACTIVE_PROFILE}:
             self.unsafe.append(pkt)
             return []
         if self.asleep:
@@ -105,6 +122,12 @@ class MouseEmulator:
             out.append(pad_packet(REPLY_ID_WORD_HDR + bytes(range(8, 12))))
         elif cmd == CMD_GET_ACTIVE_PROFILE:
             out.append(pad_packet(REPLY_GET_ACTIVE_PROFILE_HDR + bytes((self.active_profile,))))
+        elif cmd == CMD_SET_ACTIVE_PROFILE:
+            # Firmware case 0x45: PP > 4 keeps the current profile, then
+            # FUN_000340f0(PP) (same routine as the long press).
+            if pkt[5] <= 4:
+                self.active_profile = pkt[5]
+            out.append(pad_packet(REPLY_SET_ACTIVE_PROFILE_HDR))
         elif cmd == CMD_READ_PROFILE:
             idx = pkt[5]
             if idx in self.profiles:
@@ -123,9 +146,12 @@ class MouseEmulator:
                 out.append(pad_packet(REPLY_READ_BUTTON_HDR + bytes((pp, bb, 0x04, self.buttons[(pp, bb)]))))
         elif cmd == CMD_WRITE_BUTTON:
             pp, bb, kind, aa = pkt[5], pkt[6], pkt[7], pkt[8]
-            if (pp, bb) in self.buttons and kind == 0x04:
+            # Like the firmware (app_cmd.c case 0x50, type 04): the PP byte
+            # is ignored and the ACTIVE profile's button is written.
+            target = self.active_profile
+            if pp < 5 and (target, bb) in self.buttons and kind == 0x04:
                 if not self.ignore_writes:
-                    self.buttons[(pp, bb)] = aa
+                    self.buttons[(target, bb)] = aa
                 out.append(pad_packet(REPLY_OK))
         return out
 

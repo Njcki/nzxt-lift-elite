@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest import mock
 
 from nzxt_lift_elite.device import LiftElite
-from nzxt_lift_elite.errors import DangerousCommandError, ProtocolError, VerificationError
+from nzxt_lift_elite.errors import DangerousCommandError, InactiveProfileRemapError, ProtocolError, VerificationError
 from nzxt_lift_elite.mock import FakeHidraw, MouseEmulator, fake_info, open_mock
 from nzxt_lift_elite.profile import ProfileConfig
 from nzxt_lift_elite.protocol import (
@@ -72,14 +73,43 @@ class DeviceMockTest(unittest.TestCase):
         self.dev.apply_profile(target)
         self.assertEqual(len(self.emu.writes), 3)
 
-    def test_remap_other_profile(self):
+    def test_remap_non_active_profile_is_refused_before_writing(self):
+        # Real-mouse bug: editing profile 2 while profile 1 was active wrote
+        # the button into profile 1 (firmware ignores PP for 0x50 type 04).
+        with self.assertRaises(InactiveProfileRemapError) as ctx:
+            self.dev.remap(4, "back", "previous-track")
+        self.assertIn("profilo 5", str(ctx.exception))
+        self.assertEqual(self.emu.writes, [])
+        self.assertEqual(self.emu.buttons[(4, 4)], 0xA9)
+        self.assertEqual(self.emu.buttons[(0, 4)], 0xA9)  # active profile untouched
+
+    def test_emulator_writes_active_profile_like_firmware(self):
+        # Raw packet with PP=1 while profile 0 is active lands in profile 0.
+        from nzxt_lift_elite.protocol import REPLY_OK, remap_packet
+        self.dev.transact(remap_packet(1, "middle", "mute"), REPLY_OK)
+        self.assertEqual(self.emu.buttons[(0, 1)], 0x7F)
+        self.assertEqual(self.emu.buttons[(1, 1)], 0xA6)
+
+    def test_remap_other_profile_once_active(self):
+        self.emu.active_profile = 4
         self.dev.remap(4, "back", "previous-track")
         self.assertEqual(self.emu.buttons[(4, 4)], 0xEA)
         self.assertEqual(self.emu.buttons[(0, 4)], 0xA9)
 
+    def test_apply_profile_non_active_with_buttons_writes_nothing(self):
+        cur = self.dev.read_profile(1)
+        target = cur.with_changes(polling_hz=500).with_buttons({**cur.buttons, "middle": 0x7F})
+        with self.assertRaises(InactiveProfileRemapError):
+            self.dev.apply_profile(target)
+        self.assertEqual(self.emu.writes, [])  # body not written either
+        # body-only changes to a non-active profile are fine (0x93 honours PP)
+        back = self.dev.apply_profile(cur.with_changes(polling_hz=500))
+        self.assertEqual(back.polling_hz, 500)
+
     def test_apply_config_from_file_fields(self):
         cfg = ProfileConfig(dpi_stages=(800, 1200, 1600, 3200, 6400), dpi_stage=3,
                             buttons={"left": 0xA5, "right": 0xA6})
+        self.emu.active_profile = 2
         result = self.dev.apply_config(2, cfg)
         self.assertEqual(result.dpi_stages, (800, 1200, 1600, 3200, 6400))
         self.assertEqual(result.stage, 3)
@@ -119,11 +149,14 @@ class DeviceMockTest(unittest.TestCase):
         p1 = self.dev.read_profile(1)
         with self.assertRaises(VerificationError):
             self.dev.apply_profile(p1.with_changes(polling_hz=500))
-        with self.assertRaises(VerificationError):
+        self.emu.active_profile = 1
+        with self.assertRaises(VerificationError) as ctx:
             self.dev.remap(1, "left", "right-click")
+        self.assertIn("del profilo 2", str(ctx.exception))  # user-facing number
 
     def test_remap_reset(self):
         self.emu.buttons[(3, 0)] = 0x04
+        self.emu.active_profile = 3
         self.dev.remap_reset(3)
         self.assertEqual([self.emu.buttons[(3, b)] for b in range(6)], [0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA])
 
@@ -138,7 +171,7 @@ class DeviceMockTest(unittest.TestCase):
             self.dev._write(pad_packet(header(0x46)))  # still-unknown command
         with self.assertRaises(DangerousCommandError):
             self.dev._write(set_active_profile_packet(1))  # 0x45 not enabled
-        self.assertFalse(ENABLE_ACTIVE_PROFILE_APPLY)
+        self.assertTrue(ENABLE_ACTIVE_PROFILE_APPLY)  # GUI path on; raw _write still gated
         self.assertNotIn(CMD_SET_ACTIVE_PROFILE, READ_ONLY_COMMANDS)
         with self.assertRaises(DangerousCommandError):
             self.dev._write(pad_packet(header(0x93, 0, target=0x01)))  # write to receiver
@@ -181,8 +214,9 @@ class DeviceMockTest(unittest.TestCase):
         self.assertEqual(self.dev.read_active_profile(), 0)
         self.emu.active_profile = 3
         self.assertEqual(self.dev.read_active_profile(), 3)
-        with self.assertRaises(DangerousCommandError):
-            self.dev.set_active_profile(1)
+        with mock.patch("nzxt_lift_elite.device.ENABLE_ACTIVE_PROFILE_APPLY", False):
+            with self.assertRaises(DangerousCommandError):
+                self.dev.set_active_profile(1)
         self.assertEqual(self.emu.writes, [])
         self.assertEqual(self.emu.active_profile, 3)
 

@@ -126,7 +126,7 @@ Receiver (1e71:2101): same vendor interface 01 and the same framing. Commands ad
 mouse (TT=02) are assumed to be forwarded over the air (not captured in this session); the library
 sends only the read-only `0b` with TT=01 to the receiver itself.
 
-## Active profile (high confidence, write not enabled)
+## Active profile
 
 CAM names: `CMD_GET_PROFILE_NUMBER` / `CMD_SET_PROFILE_NUMBER`. Seen in the firmware's command handler (cases 0x44 / 0x45; the purple-button
 long press uses the same switch routine) and in a USB capture of CAM:
@@ -141,9 +141,13 @@ long press uses the same switch routine) and in a USB capture of CAM:
   CAM write used PP=00.
 
 `liftctl debug-dump` reads 0x44 (and the other known safe reads) so the
-user can confirm the byte changes after a long press. **0x45 is documented
-but not sent**: `ENABLE_ACTIVE_PROFILE_APPLY` stays false and 0x45 is not
-in `SAFE_COMMANDS` until that confirmation.
+user can confirm the byte changes after a long press. 0x45 is not in
+`SAFE_COMMANDS`. Only `LiftElite.activate_profile` sends it (`liftctl activate`,
+`liftctl reset-defaults`, and the GUI), through an explicit one-command
+allowlist; see "Setting the active profile (0x45)" below. The GUI uses the
+same path (`ENABLE_ACTIVE_PROFILE_APPLY = True` since confirmation on a real
+mouse on 2026-11-23): **Make active** marks the edited profile; Apply sends
+0x45 first and verifies it with 0x44, then writes buttons and settings.
 
 Whether a *custom* colour written to bytes 21..22 appears on the two-second
 profile-change flash is under test by the user.
@@ -151,3 +155,141 @@ profile-change flash is under test by the user.
 Safety: the library refuses to send any command outside the known safe set; `f5 f1 f4 f6 a1 a2 a3 a4 a5`
 (firmware/boot/flash related) exist only as `DANGEROUS_*` constants, are not reachable from the CLI, GUI
 or plugin, and there is no flashing routine.
+
+## DPI stage change notifications (none) and the GUI live poll
+
+A short press of the purple button changes the active DPI stage of the active
+profile inside the mouse only. In the application firmware's button handler
+(short-press branch) the firmware increments the profile's
+stage byte (wrapping at the stage count), reprograms the sensor, blinks the
+indicator and schedules the same deferred flash save used after a profile write
+(`0x93`/`0xb1`). No report is queued for the host on the vendor interface, and the
+standard HID mouse report has no DPI field, so there is no notification to listen for.
+
+The GUI polls instead, and only with read-only commands already used at startup:
+`0x44` (active profile) followed by one `0x92` read of that profile (byte 9 = stage).
+That is 2 short transactions every 700 ms on the cable or every 1000 ms through the
+receiver. The poll runs only while the window is focused, a mouse is connected and no
+other operation (Apply, full read, hotplug re-read) is in progress. It never opens
+the device itself, never waits for another program's lock, and backs off to 5 s after
+3 failures in a row (mouse asleep, busy, or unplugged). It never writes.
+When the stage changes, the GUI moves the applied baseline; unsaved edits are kept.
+A stage the user picked but has not applied yet stays pending.
+
+
+## Button remap writes go to the ACTIVE profile (firmware ignores PP)
+
+Found on the real mouse on 2026-11-23. Profile 2 was being edited while profile 1
+was active, and the middle button was set to Mute. The write sent
+`4e 02 85 00 50 01 01 04 7f`, and the read-back of profile 2 still returned
+middle-click.
+
+Firmware command handler, case `0x50`, type `04` (the only type we send): the
+profile index is loaded from the active-profile global (`*DAT_00030cdc`). PP
+(`pbVar22[1]`) is not used for the write. The type `01` (macro) path and `0x93`
+(profile body) honour PP, and so does the button read `0x51`. So a remap always
+changes the active profile's button. The decompiled type-04 path does not call
+the deferred flash-save routine either.
+
+Library rule since then: before any `0x50` write, `0x44` is read (read-only). The
+write is refused unless the target profile is the active one. If `0x44` cannot be
+read, the write is refused too. The check happens before anything of that Apply is
+written, body included. The GUI locks the button rows of a non-active profile.
+The emulator models the firmware behaviour. Mute = `7f` (consumer slot 4 in the
+firmware table) is consistent with the firmware and with the CAM menu capture.
+
+
+## Setting the active profile (0x45): `liftctl activate --profile N`
+
+Packets (PP = internal slot 0..4 = profile N-1), all under the device lock:
+1. `4e 02 81 00 44` → `4e 02 82 00 01 PP_before` (print current)
+2. only if different: `4e 02 82 00 45 PP` (zero padded) → `4e 02 81 00 01`
+3. `4e 02 81 00 44` → must answer PP (up to 3 reads, 100 ms apart), else error
+
+Safety gate: `assert_safe_packet(..., allow=EXPLICIT_ALLOWLIST)` where
+`EXPLICIT_ALLOWLIST = {0x45}`. Only `LiftElite.activate_profile` passes it. The
+packet must be exactly `4e 02 82 00 45 PP` with PP ≤ 4, addressed to the mouse
+(not the receiver), with zero padding. Firmware/boot commands (f1 f4 f5 f6 a1–a5)
+can never be allowed. `--dry-run` reads 0x44 but does not send 0x45.
+
+Firmware (Mouse_App 1.1.5 command handler, case 0x45, and the profile-switch
+callees):
+- The 0x45 handler clamps PP > 4 to the current index, calls `FUN_000340f0(PP)`
+  and replies with 1 byte (`4e 02 81 00 01`).
+- `FUN_000340f0` is the routine the long press calls with `0xff` (cycle). With an
+  explicit index it does the following:
+  - stores the new index in the active-profile byte;
+  - re-applies that profile's polling (`FUN_000340b8`; 8000 Hz only when USB
+    is up), resets the DPI-button state (`FUN_00032808`) and re-applies the
+    sensor settings (`FUN_00034380`, `FUN_000342c0`);
+  - shows an LED colour for 2 s (`FUN_00031834(rgb565, 2)`). The decompiled code
+    takes that colour from the profile that was active *before* the switch
+    (it reads the index before storing the new one). So the flash after
+    `liftctl activate` may show the OLD profile's colour. The long press
+    instead queues its own indication (`FUN_000310b4(4)`).
+  - queues the same deferred config save (`FUN_0003359c(3,0)`) as the long
+    press and every 0x93 profile write. The active index persists like after a
+    long press.
+- It does not modify, reorder or reset any profile data. The reset-all-profiles
+  routine `FUN_0003403c` is not called. No firmware/flash-erase path is involved.
+
+### 0x45 and the sensor / polling: why the library re-sends the body (0x93)
+
+Real mouse (2026-11-23): after switching to profile 1 with 0x45 (stored: stage 2
+= 1000 DPI, 8000 Hz; 0x92 read back correct) the pointer was much slower than it
+should be. Cycling DPI stages did not help; writing the profile again (polling
+8000 → 2000 → 8000) fixed it. Switching to a profile with a lower polling rate
+lost smoothness the same way. Purple-button long presses were fine.
+
+What the firmware does differently (Mouse_App 1.1.5, base 0x29000):
+- Long press (button handler): `FUN_000340f0(0xff)` then `FUN_000310b4(4)`. That
+  second call queues event 9 / code 4 ("profile changed") through
+  `FUN_0003104c`. When the link flag at `0x20007331` is set, `FUN_0003104c`
+  sends the event over the internal link (`FUN_000321a4`), otherwise it handles
+  it locally (`FUN_0003425c`).
+- 0x93 profile write (command handler): stores the body, then calls
+  `FUN_0003208c()` when that same flag is set. `FUN_0003208c` derives the
+  polling code from the active profile's Hz and posts message type 3 via
+  `FUN_00032048`. After that come the same `340b8 / 32808 / 34380 / 342c0 / 3359c`
+  calls as the switch routine.
+- 0x45 (command handler): only `FUN_000340f0(PP)`, with neither the event (9/4)
+  nor the polling message (type 3). The locally applied parts (`FUN_000340b8`,
+  `FUN_00034380`, `FUN_000342c0`) read the NEW profile, but the other side of the
+  link is never told about the switch. The most likely result is that it keeps
+  the previous profile's report rate / sensor timing. This fits both symptoms
+  (8000 Hz profile running slow, lower-rate profile not smooth). The bridge side
+  was not decompiled, so this part is an inference.
+- Fix in the library: `LiftElite.activate_profile` (used by `liftctl activate`,
+  the GUI **Make active** / auto-apply, and the final re-activation of
+  `reset-defaults`) re-sends the profile's current, unchanged body with the normal
+  0x93 write right after a verified 0x45 and reads it back
+  (`reapply_profile`). Sequence: `44 45 44 92 93 b0 92`. In dry-run only 0x44 is
+  read. Long presses need nothing, because the firmware notifies by itself.
+
+## Factory defaults (firmware default profile table)
+
+`FUN_0003403c` (the reset-all-profiles routine behind command 0x94, which the
+library never sends) copies a 0x31-byte template at `0x3bcfb` (file offset
+`0x12cfb`) into each of the 5 profile structs (`0x31` bytes each, active profile
+index at offset 0 of the array). It then sets the active-stage byte to the
+profile index and the colour from the table at `0x3bd2c`. It also sets the
+active profile to 2 (profile 3). Template, using the struct offsets the 0x92/0x93
+handlers use:
+
+| struct off | bytes | meaning |
+|---|---|---|
+| +1 | `05` | stage count 5 |
+| +2 | `02` → overwritten with the profile index | active stage: profile N → stage N |
+| +3..+12 | `9001 2003 4006 800c 0019` | DPI 400 / 800 / 1600 / 3200 / 6400 |
+| +0xd | `e803` | polling 1000 Hz (u16 Hz; 0x92 reports code 2) |
+| +0xf | `01` | lift-off 1 mm |
+| +0x10 | `0f` | stage mask |
+| +0x11 | from table | LED colour `1f00 00f8 e007 40fd 1ff8` |
+| +0x13 | `01` | motion sync on |
+
+The same template is in the updater and dongle images. This matches the manual
+("400 / 800 / 1600 (Default) / 3200 / 6400"; the out-of-box active profile 3 sits
+at stage 3 = 1600) and the reviews (1000 Hz default). `liftctl reset-defaults`
+writes these values with the normal verified 0x93 write (stage count and mask
+are never written). It keeps the user's active profile instead of switching to
+profile 3.

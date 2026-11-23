@@ -30,4 +30,4 @@ lift-elite-control = "nzxt_lift_elite.gui.app:main"
 packages = ["nzxt_lift_elite", "nzxt_lift_elite.gui"]
 
 [tool.setuptools.package-data]
-"nzxt_lift_elite.gui" = ["style.css"]
+"nzxt_lift_elite.gui" = ["style.css", "data/*.svg"]

@@ -7,12 +7,14 @@ Everything here is unit-tested headless; ``app.py`` only renders it.
 from __future__ import annotations
 
 import math
+import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..actions import CATEGORIES, FACTORY_ACTIONS, Action, action_by_code, search_actions
-from ..device import DeviceState, LiftElite
-from ..errors import ValidationError
+from ..device import DeviceState, LiftElite, button_changes
+from ..errors import InactiveProfileRemapError, ProtocolError, ValidationError
 from ..profile import Profile, ProfileConfig, dumps_profiles, load_profiles_json
 from ..protocol import (
     BUTTON_NAMES,
@@ -114,15 +116,20 @@ class EditorModel:
     selected: int = 0
     # Last value read from command 0x44 (internal slot), or None.
     onboard_active_profile: int | None = None
+    # «Rendi attivo»: slot to activate (0x45) at the next Applica, or None.
+    pending_activation: int | None = None
 
     # --- loading
     def load_state(self, state: DeviceState, *, keep_selection: bool = True) -> None:
+        first = not self.loaded
         self.state = state
         self.device = {p.index: p for p in state.profiles}
         self.drafts = dict(self.device)
         self.onboard_active_profile = state.active_profile
-        if not keep_selection or self.selected not in self.device:
-            self.selected = 0
+        if first or not keep_selection or self.selected not in self.device:
+            # Start on the profile the mouse is using (0x44), else profile 1.
+            active = state.active_profile
+            self.selected = active if active in self.device else 0
 
     def adopt_state(self, state: "DeviceState") -> bool:
         """Refresh the device snapshot after a reconnect.
@@ -162,7 +169,7 @@ class EditorModel:
 
     def select(self, index: int) -> None:
         if index not in self.drafts:
-            raise ValidationError(f"slot {index} non letto")
+            raise ValidationError(_("slot {index} not read", index=index))
         self.selected = index
 
     # --- edits (all return the new draft)
@@ -205,6 +212,7 @@ class EditorModel:
     def revert(self, index: int | None = None) -> None:
         if index is None:
             self.drafts = dict(self.device)
+            self.pending_activation = None
         else:
             self.drafts[index] = self.device[index]
 
@@ -225,13 +233,38 @@ class EditorModel:
 
     @property
     def activation_pending(self) -> bool:
-        """True when the selected slot should be activated on Apply (flag on only)."""
-        if not ENABLE_ACTIVE_PROFILE_APPLY or self.onboard_active_profile is None:
+        """True when Applica must activate ``pending_activation`` (0x45) first."""
+        if not ENABLE_ACTIVE_PROFILE_APPLY or self.pending_activation is None:
             return False
-        return self.selected != self.onboard_active_profile
+        return self.pending_activation != self.onboard_active_profile
+
+    def request_activation(self, index: int | None) -> None:
+        """«Rendi attivo»: activate ``index`` on the next Applica (None = cancel).
+
+        Editing a profile never activates it by itself; this explicit choice
+        does. Asking for the profile that is already active cancels it.
+        """
+        if index is not None and (index not in self.device or index == self.onboard_active_profile):
+            index = None
+        self.pending_activation = index
+
+    def buttons_writable(self, index: int | None = None) -> bool:
+        """Buttons (0x50) land only in the active profile: editable when ``index``
+        is active, unknown, or will be activated first by Applica."""
+        i = self.selected if index is None else index
+        if self.onboard_active_profile is None or i == self.onboard_active_profile:
+            return True
+        return self.activation_pending and self.pending_activation == i
+
+    @property
+    def has_pending_apply(self) -> bool:
+        """Something for Applica: unsaved edits, or an activation."""
+        return self.any_dirty or self.activation_pending
 
     def mark_activated(self, index: int) -> None:
         self.onboard_active_profile = index
+        if self.pending_activation == index:
+            self.pending_activation = None
 
     def changes(self, index: int) -> list[str]:
         a, b = self.device[index], self.drafts[index]
@@ -259,9 +292,72 @@ class EditorModel:
     def summary(self) -> list[tuple[int, list[str]]]:
         return [(i, self.changes(i)) for i in self.dirty_slots()]
 
-    def mark_applied(self, profile: Profile) -> None:
+    def adopt_device_stage(self, slot: int, stage: int, active_profile: int | None = None) -> bool:
+        """The mouse reports ``stage`` (1-based) as active in ``slot`` (purple button).
+
+        Called by the GUI's live poll. Updates the *applied* baseline so the
+        change is not shown as an edit and Applica does not revert it:
+
+        - the device snapshot of ``slot`` takes the new stage;
+        - if the draft had the same stage as the old baseline (no pending
+          stage choice), the draft follows the mouse too; all other unsaved
+          edits in the draft (DPI values, polling, buttons…) are kept;
+        - if the user had picked another stage that is not applied yet, that
+          choice stays pending (it will be written on Applica); if it now
+          equals the mouse's stage, it simply stops being a change.
+
+        Returns True when anything visible changed. Never writes.
+        """
+        changed = False
+        if active_profile is not None and active_profile != self.onboard_active_profile:
+            self.onboard_active_profile = active_profile
+            changed = True
+        base = self.device.get(slot)
+        if base is None or not (1 <= stage <= base.stage_count) or base.stage == stage:
+            return changed
+        draft = self.drafts.get(slot, base)
+        self.device[slot] = base.with_changes(stage=stage)
+        if draft.stage == base.stage:
+            self.drafts[slot] = draft.with_changes(stage=stage)
+        return True
+
+    def adopt_poll(self, active_profile: int | None, slot: int, stage: int) -> "PollChange":
+        """Merge one live-poll result (0x44 + 0x92 of the active profile).
+
+        - The onboard-active marker follows the mouse (long press).
+        - The DPI stage of ``slot`` follows the mouse (short press), see
+          :meth:`adopt_device_stage`; unsaved edits are kept.
+        - The *edited* profile is a separate choice. It follows the mouse
+          only when the user was editing the previously active profile and
+          has no unsaved edits anywhere; otherwise it stays where it is.
+        Never writes.
+        """
+        prev = self.onboard_active_profile
+        active_changed = active_profile is not None and active_profile != prev and active_profile in self.device
+        if active_changed:
+            self.onboard_active_profile = active_profile
+            if self.pending_activation == active_profile:
+                self.pending_activation = None  # long press did it already
+        stage_changed = self.adopt_device_stage(slot, stage)
+        switched = False
+        if (active_changed and prev is not None and self.selected == prev
+                and not self.any_dirty and self.pending_activation is None):
+            self.selected = active_profile
+            switched = True
+        return PollChange(active_changed, stage_changed, switched)
+
+    def mark_applied(self, profile: Profile, sent: Profile | None = None) -> None:
+        """``profile`` was written and read back. With ``sent`` (auto-apply),
+        a draft edited again while the write was running is kept (it is
+        still dirty and goes out with the next batch)."""
         self.device[profile.index] = profile
-        self.drafts[profile.index] = profile
+        if sent is None or self.drafts.get(profile.index) == sent:
+            self.drafts[profile.index] = profile
+
+    def pending_signature(self) -> tuple:
+        """What auto-apply would write now (to restart the debounce only on real edits)."""
+        act = self.pending_activation if self.activation_pending else None
+        return tuple((i, self.drafts[i]) for i in self.dirty_slots()), act
 
     # --- warnings
     def polling_note(self) -> str | None:
@@ -269,6 +365,34 @@ class EditorModel:
 
 
 # --- session: talks to the device; run it off the GTK main thread ----------------
+
+
+@dataclass(frozen=True)
+class PollChange:
+    """What :meth:`EditorModel.adopt_poll` changed."""
+
+    active_changed: bool
+    stage_changed: bool
+    switched: bool  # the edited profile followed the mouse
+
+    def __bool__(self) -> bool:
+        return self.active_changed or self.stage_changed or self.switched
+
+
+@dataclass(frozen=True)
+class StagePoll:
+    """Result of :meth:`Session.poll_active_stage`."""
+
+    active_profile: int | None  # internal slot from 0x44, None if 0x44 failed
+    slot: int  # slot whose body was read
+    stage: int  # 1-based active DPI stage of that slot
+
+
+# Live poll cadence (ms). Wireless is slower: every request goes over the air.
+POLL_INTERVAL_WIRED_MS = 700
+POLL_INTERVAL_WIRELESS_MS = 1000
+POLL_BACKOFF_MS = 5000  # after repeated failures (mouse asleep, busy, unplugged)
+POLL_FAILURES_BEFORE_BACKOFF = 3
 
 
 class Session:
@@ -282,6 +406,13 @@ class Session:
         self.store = store or ProfileStore()
         self._dev: LiftElite | None = None
         self._fake = None
+        # One device conversation at a time inside this process: worker
+        # threads (read, apply, live poll) share one fd, and flock does not
+        # serialise threads that use the same open file.
+        self._io = threading.RLock()
+        # Auto-apply («Apply immediately») backs up each slot only once per
+        # session, before its first automatic write (not once per change).
+        self.backed_up: set[int] = set()
 
     @property
     def is_mock(self) -> bool:
@@ -307,33 +438,123 @@ class Session:
         self._fake = None
 
     def read_state(self) -> DeviceState:
+        with self._io:
+            try:
+                return self._open().read_state()
+            except Exception:
+                self.close()  # re-detect next time (receiver/cable may have changed)
+                raise
+
+    @contextmanager
+    def _quick(self, dev: LiftElite, timeout: float):
+        """Short timeouts, one attempt, no waiting for another program's lock."""
+        saved = dev.timeout, dev.retries, dev.lock_timeout
+        dev.timeout, dev.retries, dev.lock_timeout = timeout, 1, 0.0
         try:
-            return self._open().read_state()
-        except Exception:
-            self.close()  # re-detect next time (receiver/cable may have changed)
-            raise
+            yield dev
+        finally:
+            dev.timeout, dev.retries, dev.lock_timeout = saved
+
+    def poll_active_stage(self, fallback_slot: int | None = None, *, timeout: float = 0.3) -> "StagePoll | None":
+        """Live read of the active DPI stage (after a purple-button press).
+
+        Read-only: ``0x44`` (active profile) then one ``0x92`` profile read
+        (byte 9 = stage, 0-based, returned 1-based). No button reads, no
+        writes. Returns None without touching the mouse when another device
+        operation is running in this process (Apply, full read) or the
+        device is not open (hotplug re-detects; the poll never opens it).
+        Raises DeviceBusyError / ProtocolError / OSError on failure.
+        """
+        if not self._io.acquire(blocking=False):
+            return None
+        try:
+            dev = self._dev
+            if dev is None:
+                return None
+            with self._quick(dev, timeout), dev.locked():
+                try:
+                    active = dev.read_active_profile()
+                except ProtocolError:
+                    if fallback_slot is None:
+                        raise
+                    active = None
+                slot = active if active is not None else fallback_slot
+                profile = dev.read_profile(slot, with_buttons=False)
+            return StagePoll(active_profile=active, slot=slot, stage=profile.stage)
+        finally:
+            self._io.release()
 
     def apply(
-        self, targets: list[Profile], *, activate_profile: int | None = None
+        self, targets: list[Profile], *, activate_profile: int | None = None, auto: bool = False
     ) -> tuple[list[Profile], Path | None]:
-        """Backup, write each slot, verify; returns profiles read back.
+        """Backup, (activate,) write each slot, verify; returns profiles read back.
 
         ``activate_profile`` (internal slot) is sent with command 0x45 only
-        when ``ENABLE_ACTIVE_PROFILE_APPLY`` is True. The flag stays off
-        until the user confirms 0x44/0x45 on the real mouse.
+        when ``ENABLE_ACTIVE_PROFILE_APPLY`` is True. It is sent FIRST,
+        because button writes (0x50) only ever land in the active profile.
         """
+        with self._io:
+            return self._apply_locked(targets, activate_profile=activate_profile, auto=auto)
+
+    def backup_needed(self, current: list[Profile], auto: bool) -> list[Profile]:
+        """Profiles to back up: all of them for a manual Apply; for auto-apply
+        only the slots not yet backed up in this session."""
+        if not auto:
+            return list(current)
+        return [c for c in current if c.index not in self.backed_up]
+
+    def _backup(self, profiles: list[Profile], reason: str) -> Path | None:
+        if not profiles:
+            return None
+        self.backed_up.update(p.index for p in profiles)
+        if self.is_mock:
+            return None
+        try:
+            return self.store.backup(profiles, reason=reason)
+        except OSError:
+            return None
+
+    def reset_defaults(self, progress=None):
+        """Factory reset of all five profiles (see LiftElite.reset_defaults):
+        backup of all profiles first, only verified writes plus 0x45, the
+        profile active before is made active again at the end."""
+        with self._io:
+            dev = self._open()
+            result = dev.reset_defaults(backup=lambda profiles: self._backup(profiles, "reset"), progress=progress)
+            if not self.is_mock:
+                for p in result.results:
+                    try:
+                        self.store.remember_slot(p)
+                    except OSError:
+                        pass
+            return result
+
+    def _apply_locked(
+        self, targets: list[Profile], *, activate_profile: int | None = None, auto: bool = False
+    ) -> tuple[list[Profile], Path | None]:
         dev = self._open()
         backup = None
+        activate = activate_profile if ENABLE_ACTIVE_PROFILE_APPLY else None
         with dev.locked():
             current = [dev.read_profile(p.index) for p in targets]
-            if not self.is_mock:
-                try:
-                    backup = self.store.backup(current, reason="gui")
-                except OSError:
-                    backup = None
+            # Buttons can only be written to the profile active on the mouse
+            # (firmware ignores the profile byte of 0x50). Check every slot
+            # before the first write so a refused Apply writes nothing.
+            for t, c in zip(targets, current, strict=True):
+                if not button_changes(c, t):
+                    continue
+                if activate is not None:
+                    if t.index != activate:
+                        raise InactiveProfileRemapError(
+                            _("the buttons of profile {n} cannot be written: Apply activates profile {m}. "
+                              "Nothing was written.", n=t.index + 1, m=activate + 1)
+                        )
+                else:
+                    dev.require_active_for_remap(t.index)
+            backup = self._backup(self.backup_needed(current, auto), "auto" if auto else "gui")
+            if activate is not None:
+                dev.set_active_profile(activate)  # first: buttons need it active
             results = [dev.apply_profile(t, current=c) for t, c in zip(targets, current, strict=True)]
-            if ENABLE_ACTIVE_PROFILE_APPLY and activate_profile is not None:
-                dev.set_active_profile(activate_profile)
         if not self.is_mock:
             for p in results:
                 try:
@@ -359,4 +580,4 @@ def import_profile(path: str | Path, slot: int) -> ProfileConfig:
     match = [c for c in configs if c.index == slot]
     if match:
         return match[0]
-    raise ValidationError(f"il file contiene {len(configs)} profili e nessuno per lo slot {slot}")
+    raise ValidationError(_("the file contains {n} profiles and none for slot {slot}", n=len(configs), slot=slot))

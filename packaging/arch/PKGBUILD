@@ -36,7 +36,7 @@ check() {
 }
 
 package_nzxt-lift-elite() {
-  depends=(python python-gobject gtk4 libadwaita python-pyudev)
+  depends=(python python-gobject gtk4 libadwaita librsvg python-pyudev)
   cd "$(_src)"
   python -m installer --destdir="$pkgdir" dist/*.whl
   install -Dm644 70-nzxt-lift-elite.rules "$pkgdir/usr/lib/udev/rules.d/70-nzxt-lift-elite.rules"

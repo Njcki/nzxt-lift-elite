@@ -29,9 +29,10 @@ raggiungibili: la libreria li rifiuta.
   parlano direttamente con `/dev/hidraw*`: **non servono hidapi né libusb**.
 - Python **3.10** o successivo.
 - Per `liftctl` e la libreria: nient'altro (solo libreria standard).
-- Per la GUI: **GTK 4**, **libadwaita ≥ 1.5** e **PyGObject**. **pyudev** è
-  consigliato per rilevare subito collegamento e scollegamento; senza, l'app
-  controlla `/sys/class/hidraw` ogni 1,5 s.
+- Per la GUI: **GTK 4**, **libadwaita ≥ 1.5**, **PyGObject** e **librsvg**
+  (anteprima stilizzata del mouse; se manca librsvg si usa un disegno vettoriale
+  incorporato). **pyudev** è consigliato per rilevare subito collegamento e
+  scollegamento; senza, l'app controlla `/sys/class/hidraw` ogni 1,5 s.
 - Per il plugin CoolerControl: CoolerControl, `grpcio` e `protobuf`, più
   `grpcio-tools` per generare gli stub gRPC.
 - Per i permessi senza root: systemd-logind (o elogind) per il tag udev `uaccess`.
@@ -40,9 +41,9 @@ Pacchetti tipici:
 
 | Distribuzione | Dipendenze della GUI |
 |---|---|
-| Arch Linux / CachyOS / Manjaro | `python-gobject gtk4 libadwaita python-pyudev` |
-| Debian / Ubuntu | `python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-pyudev` |
-| Fedora | `python3-gobject gtk4 libadwaita python3-pyudev` |
+| Arch Linux / CachyOS / Manjaro | `python-gobject gtk4 libadwaita librsvg python-pyudev` |
+| Debian / Ubuntu | `python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 gir1.2-rsvg-2.0 python3-pyudev` |
+| Fedora | `python3-gobject gtk4 libadwaita librsvg2 python3-pyudev` |
 
 I nomi possono variare tra le versioni; l'importante è che funzioni
 `python3 -c "import gi; gi.require_version('Adw', '1'); from gi.repository import Adw"`.
@@ -123,36 +124,54 @@ wireless dorme le letture vanno in timeout: muovilo e riprova.
 
 ## Lift Elite Control (GUI)
 
-- **selettore del profilo** 1–5, con il colore del LED di ciascuno: sceglie il
-  profilo *da modificare*, non lo attiva sul mouse (per cambiare il profilo
-  attivo: pressione lunga sul tasto viola sotto il mouse)
+- **selettore del profilo** 1–5, con il colore del LED di ciascuno e l'indicazione
+  di quale è attivo sul mouse. **Rendi attivo** cambia il profilo live
+  dall'app (puoi comunque usare la pressione lunga sul tasto viola sotto il
+  mouse). Dopo il cambio la libreria riscrive il corpo del profilo, così
+  polling e impostazioni del sensore vengono applicati.
+- **stadio DPI in tempo reale**: con la finestra in primo piano l'app interroga
+  (in sola lettura) il profilo attivo e lo stadio corrente. Una pressione
+  breve del tasto viola si vede nell'interfaccia.
 - **prestazioni**: polling (avvisa che 8000 Hz va solo via cavo), lift-off
   1/2 mm, motion sync, colore del LED del profilo
-- **anteprima del mouse**: clicca i tasti sul disegno, inclusa la vista del
-  fondo per il tasto viola
+- **anteprima del mouse**: un disegno stilizzato e cliccabile, inclusa la
+  vista del fondo per il tasto viola. L'altezza dell'anteprima è
+  ridimensionabile entro certi limiti (predefinito 280 px, circa 180–420 px;
+  doppio clic sull'impugnatura per ripristinare). Le due viste stanno affiancate
+  o una sotto l'altra, a seconda della larghezza. Si usa librsvg se c'è,
+  altrimenti un disegno vettoriale incorporato.
 - **5 stadi DPI** con slider e campo numerico (50–26000, passi di 50); lo
   stadio attivo salvato nel profilo è evidenziato
 - **collegamento in tempo reale**: se attacchi o stacchi il cavo o il
   ricevitore l'app se ne accorge da sola (preferisce il cavo se ci sono
   entrambi); le modifiche non salvate restano e non scrive nulla da sola
 - **tasti**: clicca un tasto e scegli l'azione da un elenco con ricerca
-  (clic, tasti multimediali, lettere, F1–F24, modificatori…)
+  (clic, tasti multimediali, lettere, F1–F24, modificatori…). Le righe dei
+  tasti di un profilo che non è attivo sul mouse sono bloccate: una
+  rimappatura scrive sempre sul profilo attivo.
 - **profili con nome**: salva, carica, elimina, importa/esporta JSON
 - **Applica** scrive solo ciò che è cambiato e lo rilegge per verificarlo
   (prima salva un backup in silenzio); **Annulla modifiche** torna ai valori
   letti dal mouse
-- tema chiaro/scuro che segue il sistema
-
-L'interfaccia è in **italiano** di default; `LIFT_ELITE_LANG=en` la mette in inglese.
+- **Applica subito**: impostazione opzionale che scrive ogni modifica appena
+  la fai (gli slider vengono applicati al rilascio del puntatore)
+- **Ripristina impostazioni di fabbrica**, di fianco a Rileggi: ripristina
+  stadi DPI, polling, lift-off, motion sync, colori LED e tasti di fabbrica
+  su tutti e cinque i profili, poi torna al profilo che era attivo
+- tema chiaro/scuro che segue il sistema, oppure una preferenza salvata
+- **lingua**: italiano e inglese, dal menu (Lingua), da `--lang`, da
+  `LIFT_ELITE_LANG`, dalla preferenza salvata o dalla lingua di sistema
 
 Opzioni: `--device /dev/hidrawN`, `--transport wired|wireless`,
-`--theme dark|light`, `--mock`, `--mock-wireless`.
+`--theme dark|light`, `--lang it|en`, `--mock`, `--mock-wireless`.
 
 ## liftctl (riga di comando)
 
 I profili si indicano **1–5** (come nella GUI); nella memoria del mouse e nei
 file JSON il campo `profile` è lo slot interno **0–4**. Gli stadi DPI sono
-**1–5** (il byte sul filo è 0–4).
+**1–5** (il byte sul filo è 0–4). I testi di aiuto della CLI seguono la
+stessa scelta di lingua della GUI (`LIFT_ELITE_LANG`, la preferenza salvata
+o la lingua di sistema).
 
 ```sh
 liftctl show                          # tutti i profili (sola lettura)
@@ -170,6 +189,8 @@ liftctl restore-led-colors            # colori LED di fabbrica (solo quel campo)
 liftctl remap --profile 1 --button forward --action volume-up
 liftctl remap --profile 1 --button dpi --action key:0x04    # tasto "a"
 liftctl remap --profile 1 --reset                            # tasti di fabbrica
+liftctl activate --profile 2                                 # rendi attivo il profilo 2
+liftctl reset-defaults --yes                                 # predefiniti di fabbrica su tutti e 5 i profili
 liftctl actions volume                                       # cerca un'azione
 
 liftctl save FPS --profile 1          # profilo con nome
@@ -191,7 +212,12 @@ liftctl --dry-run load --all tutti.json
 
 `set`, `remap` e `load` fanno sempre **lettura → modifica dei soli campi
 richiesti → scrittura → rilettura di verifica**. I byte non ancora decodificati
-restano com'erano.
+restano com'erano. `remap` viene rifiutato se il profilo di destinazione non
+è quello attualmente attivo sul mouse. `activate` rende attivo un profilo
+(comando `0x45`) e poi ne riscrive il corpo, così polling e impostazioni del
+sensore hanno effetto. `reset-defaults` ripristina i valori di fabbrica noti
+su tutti e cinque i profili (serve `--yes`) e lascia selezionato il profilo
+che era attivo.
 
 Opzioni globali: `--dry-run` (legge ma non scrive: stampa i pacchetti),
 `--debug` (dump esadecimale di ogni pacchetto), `--device /dev/hidrawN`,
@@ -219,6 +245,7 @@ riscrive i byte di fabbrica esatti:
 
 In `~/.config/nzxt-lift-elite/`:
 
+- `settings.json`: lingua, tema, applica-subito e altezza dell'anteprima
 - `profiles/*.json`: profili con nome (GUI e `liftctl save NOME`)
 - `slots/slot-N.json`: l'ultimo stato scritto in ciascuno slot
 - `backups/`: copia dei 5 profili prima di ogni scrittura (gli ultimi 50)
@@ -267,7 +294,7 @@ cd nzxt-lift-elite/packaging/arch
 makepkg -si          # da utente normale, senza sudo: la password la chiede all'installazione
 ```
 
-Le dipendenze (`python-gobject`, `gtk4`, `libadwaita`, `python-pyudev`,
+Le dipendenze (`python-gobject`, `gtk4`, `libadwaita`, `librsvg`, `python-pyudev`,
 `python-grpcio`…) le installa pacman. Per ricompilare e reinstallare la stessa
 versione dopo un aggiornamento del checkout: `makepkg -sif`. Se il plugin non
 ti serve: `makepkg -s` e poi
@@ -291,12 +318,6 @@ se vuoi). I comandi funzionano in bash, zsh e fish.
 
 ## Cosa non è ancora noto
 
-- **profilo attivo**: si legge con il comando `0x44` (`CMD_GET_PROFILE_NUMBER`
-  di CAM), confermato nel firmware e in una cattura di CAM; `liftctl show` lo
-  stampa come sperimentale. L'impostazione (`0x45`) è implementata ma
-  **disattivata** finché non è confermata su un mouse vero. Per aiutare:
-  `liftctl debug-dump --out a.txt`, pressione lunga sul tasto viola,
-  `liftctl debug-dump --out b.txt`, confronta la riga `44 get-active-profile`.
 - la lettura dei tasti e le versioni del ricevitore sono state catturate via
   cavo; attraverso il ricevitore si assume lo stesso protocollo
 - **colori LED personalizzati**: vengono salvati e riletti, ma se il lampeggio
@@ -311,6 +332,16 @@ Senza mouse collegato, dalla radice del progetto:
 ```sh
 python3 -m unittest discover -s tests -t .
 ```
+
+Usano un hidraw finto (socket) che emula il mouse. La suite è isolata:
+`HOME` e `XDG_*` puntano a una cartella temporanea (quindi un `settings.json`
+locale, i backup e la lingua scelta non contano), la locale è forzata e i
+nodi `/dev/hidraw*` reali non possono essere aperti né trovati. I test che
+muovono il puntatore con xdotool partono solo con `LIFT_ELITE_POINTER_TESTS=1`
+(su un display di prova, es. `xvfb-run`). I test della GUI richiedono
+PyGObject (con cairo) e il smoke test parte solo con un display
+(`xvfb-run -a python3 -m unittest tests.test_gui_smoke`); il test gRPC del
+plugin richiede `grpcio` e `grpcio-tools`.
 
 ## Licenza e avvertenze
 

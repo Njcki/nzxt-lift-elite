@@ -52,8 +52,15 @@
 .stage-row.active-stage {
   background-color: alpha(@accent_bg_color, 0.13);
 }
-.stage-row.active-stage .title {
+.stage-row.active-stage .stage-title {
   font-weight: 800;
+}
+.stage-box {
+  padding: 6px 12px;
+  min-height: 38px;
+}
+.stage-subtitle {
+  font-feature-settings: "tnum";
 }
 
 .dpi-spin {
@@ -90,8 +97,22 @@
   opacity: 0.6;
 }
 
-/* Prepared (disabled until 0x44/0x45 are confirmed): mark the profile
-   currently active on the mouse in the slot switcher. */
+/* Profile the mouse is using (0x44, read live): accent bar under the
+   button. Independent of the toggle state, which means "being edited". */
 .slot-switcher .onboard-active {
-    font-weight: 600;
+    font-weight: 700;
+    box-shadow: inset 0 -3px @accent_bg_color;
 }
+.onboard-active-label {
+    font-size: 0.9em;
+    font-weight: 600;
+    color: @accent_color;
+}
+
+/* drag handle under the preview */
+.preview-grip { padding: 4px 0; }
+.preview-grip-bar {
+  border-radius: 999px;
+  background-color: alpha(@window_fg_color, 0.22);
+}
+.preview-grip:hover .preview-grip-bar { background-color: alpha(@accent_bg_color, 0.8); }

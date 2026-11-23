@@ -33,8 +33,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import DangerousCommandError, DeviceBusyError, DeviceNotFoundError, ProtocolError, VerificationError
-from .profile import Profile, ProfileConfig, diff_profiles
+from .errors import (
+    DangerousCommandError,
+    DeviceBusyError,
+    DeviceNotFoundError,
+    InactiveProfileRemapError,
+    ProtocolError,
+    VerificationError,
+)
+from .profile import Profile, ProfileConfig, diff_profiles, factory_buttons
+from .i18n import _
 from .protocol import (
     BUTTON_NAMES,
     BUSY_PREFIX,
@@ -75,6 +83,7 @@ from .protocol import (
     read_profile_reply_prefix,
     remap_packet,
     set_active_profile_packet,
+    EXPLICIT_ALLOWLIST,
     status_packet,
     uid_packet,
     validate_profile_index,
@@ -322,13 +331,13 @@ def open_hidraw(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise PermissionError(
-                    f"permesso negato su {path}. Installa 70-nzxt-lift-elite.rules "
-                    "e ricollega il mouse/ricevitore (oppure: sudo udevadm trigger)."
+                    _("permission denied on {path}. Install 70-nzxt-lift-elite.rules "
+                      "and reconnect the mouse/receiver (or: sudo udevadm trigger).", path=path)
                 ) from exc
             sleeper(min(delay, remaining))
             delay = min(delay * 1.6, 0.7)
         except FileNotFoundError as exc:
-            raise DeviceNotFoundError(f"{path} non esiste (mouse scollegato?)") from exc
+            raise DeviceNotFoundError(_("{path} does not exist (mouse unplugged?)", path=path)) from exc
     raise last  # pragma: no cover
 
 
@@ -355,12 +364,12 @@ def find_hidraw(sys_root: Path = SYS_HIDRAW, path: str | None = None, transport:
     chosen = choose_vendor_hidraw(iter_lift_elite_hidraw(sys_root=sys_root), transport)
     if chosen is None:
         what = {
-            TRANSPORT_WIRED: "mouse via cavo (1e71:2129)",
-            TRANSPORT_WIRELESS: "ricevitore (1e71:2101)",
-        }.get(transport, "NZXT Lift Elite (1e71:2129 via cavo o ricevitore 1e71:2101)")
+            TRANSPORT_WIRED: _("wired mouse (1e71:2129)"),
+            TRANSPORT_WIRELESS: _("receiver (1e71:2101)"),
+        }.get(transport, _("NZXT Lift Elite (1e71:2129 wired or receiver 1e71:2101)"))
         raise DeviceNotFoundError(
-            f"{what}: interfaccia hidraw non trovata. Il mouse o il ricevitore sono collegati? "
-            "Serve la regola udev 70-nzxt-lift-elite.rules per l'accesso senza root."
+            _("{what}: hidraw interface not found. Is the mouse or the receiver connected? "
+              "The udev rule 70-nzxt-lift-elite.rules is needed for access without root.", what=what)
         )
     return chosen
 
@@ -467,7 +476,7 @@ class LiftElite:
                 except BlockingIOError:
                     if time.monotonic() > deadline:
                         raise DeviceBusyError(
-                            "il mouse è occupato da un altro programma (GUI, liftctl o plugin CoolerControl)"
+                            _("the mouse is busy with another program (GUI, liftctl or the CoolerControl plugin)")
                         ) from None
                     time.sleep(0.05)
                 except OSError as exc:
@@ -500,10 +509,11 @@ class LiftElite:
             data = data[1:]
         return data[:PACKET_SIZE]
 
-    def _write(self, packet: bytes, *, actually_write: bool = True) -> None:
-        # Hard safety gate: only known configuration commands, never firmware ones.
-        assert_safe_packet(packet)
-        self._log("OUT" if actually_write else "OUT (dry-run, non inviato)", packet)
+    def _write(self, packet: bytes, *, actually_write: bool = True, allow: frozenset[int] = frozenset()) -> None:
+        # Hard safety gate: only known configuration commands, never firmware
+        # ones. ``allow`` can only add EXPLICIT_ALLOWLIST (0x45) for one call.
+        assert_safe_packet(packet, allow=allow)
+        self._log("OUT" if actually_write else "OUT (dry-run, not sent)", packet)
         if not actually_write:
             return
         if self._fd is None:
@@ -517,7 +527,7 @@ class LiftElite:
     def _read_available(self, remaining: float) -> bytes | None:
         if self._fd is None:
             raise ProtocolError("device is not open")
-        ready, _, _ = select.select([self._fd], [], [], max(remaining, 0.0))
+        ready, _w, _x = select.select([self._fd], [], [], max(remaining, 0.0))
         if not ready:
             return None
         try:
@@ -526,7 +536,7 @@ class LiftElite:
             return None
         except OSError as exc:
             if exc.errno in (errno.ENODEV, errno.EIO):
-                raise DeviceNotFoundError("il dispositivo è stato scollegato") from exc
+                raise DeviceNotFoundError(_("the device was unplugged")) from exc
             raise
         if not data:
             return None
@@ -538,7 +548,7 @@ class LiftElite:
         if self._fd is None:
             return
         while True:
-            ready, _, _ = select.select([self._fd], [], [], 0)
+            ready, _w, _x = select.select([self._fd], [], [], 0)
             if not ready:
                 return
             try:
@@ -554,6 +564,7 @@ class LiftElite:
         *,
         timeout: float | None = None,
         retries: int | None = None,
+        allow: frozenset[int] = frozenset(),
     ) -> bytes:
         """Send ``packet`` and wait for a reply starting with ``expect_prefix``.
 
@@ -565,14 +576,14 @@ class LiftElite:
         cmd = command_of(packet)
         is_read = cmd in READ_ONLY_COMMANDS
         if self.dry_run and not is_read:
-            self._write(packet, actually_write=False)
+            self._write(packet, actually_write=False, allow=allow)
             return b""
         timeout = self.timeout if timeout is None else timeout
         retries = (self.retries if retries is None else retries) if is_read else 1
         last_unexpected: bytes | None = None
         with self.locked():
             for _attempt in range(max(retries, 1)):
-                self._write(packet)
+                self._write(packet, allow=allow)
                 deadline = time.monotonic() + timeout
                 while True:
                     remaining = deadline - time.monotonic()
@@ -584,14 +595,15 @@ class LiftElite:
                     if incoming[: len(expect_prefix)] == expect_prefix:
                         return incoming
                     last_unexpected = incoming
-        detail = f"; ultima risposta inattesa: {last_unexpected[:8].hex(' ')}" if last_unexpected else ""
+        detail = _("; last unexpected reply: {hex}", hex=last_unexpected[:8].hex(' ')) if last_unexpected else ""
         hint = (
-            " Il mouse è acceso e vicino al ricevitore? (in standby non risponde: muovilo e riprova)"
+            " " + _("Is the mouse on and near the receiver? (it does not answer in standby: move it and try again)")
             if self.transport == TRANSPORT_WIRELESS
             else ""
         )
         raise ProtocolError(
-            f"nessuna risposta {expect_prefix.hex(' ')} da {self.info.path} dopo {retries} tentativi{detail}.{hint}"
+            _("no reply {prefix} from {path} after {n} attempts", prefix=expect_prefix.hex(' '), path=self.info.path, n=retries)
+            + f"{detail}.{hint}"
         )
 
     # --- reads -------------------------------------------------------------
@@ -638,27 +650,63 @@ class LiftElite:
         reply = self.transact(read_active_profile_packet(), REPLY_GET_ACTIVE_PROFILE_HDR)
         return parse_active_profile_reply(reply)
 
+    def activate_profile(self, index: int, *, verify: bool = True) -> "ActivateResult":
+        """Make internal slot ``index`` the active onboard profile via ``0x45``.
+
+        The only code path allowed to send 0x45 (``liftctl activate``; the
+        GUI goes through :meth:`set_active_profile`, gated by
+        ENABLE_ACTIVE_PROFILE_APPLY). Sequence, all under the device lock:
+        read 0x44 (before) → if different, send exactly
+        ``4e 02 82 00 45 PP`` and expect ``4e 02 81 00 01`` → read 0x44
+        again and compare. Firmware: same routine as the purple-button long
+        press (FUN_000340f0), see PROTOCOL.md.
+        """
+        validate_profile_index(index)
+        packet = set_active_profile_packet(index)
+        with self.locked():
+            before = self.read_active_profile()
+            if before == index:
+                return ActivateResult(before=before, after=before, sent=None, reply=None)
+            reply = self.transact(packet, REPLY_SET_ACTIVE_PROFILE_HDR, allow=EXPLICIT_ALLOWLIST)
+            if self.dry_run:
+                return ActivateResult(before=before, after=None, sent=packet, reply=None)
+            after = None
+            if verify:
+                for _attempt in range(3):
+                    after = self.read_active_profile()
+                    if after == index:
+                        break
+                    time.sleep(0.1)
+            if verify and after != index:
+                raise VerificationError(
+                    _("active profile: asked for profile {n}, read back profile {got}",
+                      n=index + 1, got="?" if after is None else after + 1)
+                )
+            # Real mouse (2026-11-23): after 0x45 the pointer ran much slower
+            # than the stored DPI (profile at 8000 Hz) until the profile was
+            # written again. Re-send the unchanged body with the normal 0x93
+            # write and read it back, so the firmware runs its full "profile
+            # changed" path (see PROTOCOL.md, "0x45 and the sensor").
+            refreshed = self.reapply_profile(index, verify=verify)
+        return ActivateResult(before=before, after=after, sent=packet, reply=reply, refreshed=refreshed)
+
+    def reapply_profile(self, index: int, *, verify: bool = True) -> Profile:
+        """Write slot ``index``'s current body back unchanged (0x93), then read it back."""
+        validate_profile_index(index)
+        with self.locked():
+            current = self.read_profile(index, with_buttons=False)
+            return self.write_profile_body(current, verify=verify)
+
     def set_active_profile(self, index: int, *, verify: bool = True) -> int:
-        """Switch the onboard active profile via ``0x45``. Disabled until confirmed."""
+        """GUI path for 0x45. Disabled until ENABLE_ACTIVE_PROFILE_APPLY is on."""
         validate_profile_index(index)
         if not ENABLE_ACTIVE_PROFILE_APPLY:
             raise DangerousCommandError(
-                "attivazione del profilo (comando 0x45) non abilitata: "
-                "in attesa di conferma sul mouse reale con liftctl debug-dump"
+                _("profile activation (command 0x45) from the GUI is not enabled yet: "
+                  "confirm it first with `liftctl activate`")
             )
-        packet = set_active_profile_packet(index)
-        with self.locked():
-            self.transact(packet, REPLY_SET_ACTIVE_PROFILE_HDR)
-            if self.dry_run:
-                return index
-            if not verify:
-                return index
-            read_back = self.read_active_profile()
-            if read_back != index:
-                raise VerificationError(
-                    f"profilo attivo: scritto slot {index}, riletto slot {read_back}"
-                )
-            return read_back
+        result = self.activate_profile(index, verify=verify)
+        return index if result.after is None else result.after
 
     def debug_dump(self, *, with_buttons: bool = True) -> list[tuple[str, bytes, bytes | None, str | None]]:
         """Send every known safe read command and return (label, request, reply, error).
@@ -749,31 +797,58 @@ class LiftElite:
             back = self.read_profile(profile.index, with_buttons=False).with_buttons(profile.buttons)
         problems = diff_profiles(profile.with_buttons(None), back.with_buttons(None))
         if problems:
-            raise VerificationError("la scrittura del profilo non è stata applicata: " + "; ".join(problems))
+            raise VerificationError(_("the profile write was not applied: {problems}", problems="; ".join(problems)))
         return back
 
+    def require_active_for_remap(self, profile: int) -> None:
+        """Refuse a button write unless ``profile`` (internal slot) is active.
+
+        Firmware (fw/re/dec/app_cmd.c, case 0x50 with type 04) takes the
+        profile index from the active-profile global and ignores the PP
+        byte of ``4e 02 85 00 50 PP BB 04 AA``; the button read 0x51 does
+        honour PP. Writing a non-active profile therefore changes the
+        active one. Read-only check with 0x44; never sends 0x45.
+        """
+        validate_profile_index(profile)
+        try:
+            active = self.read_active_profile()
+        except ProtocolError as exc:
+            raise InactiveProfileRemapError(
+                _("cannot read the active profile (0x44): to be safe the buttons are not changed")
+            ) from exc
+        if active != profile:
+            raise InactiveProfileRemapError(
+                _("buttons can only be changed on the profile active on the mouse: profile {n} "
+                  "is not active (active: profile {active}). Make it active (`liftctl activate`, «Make active» in "
+                  "the app or a long press of the purple button), then try again. Nothing was written.", n=profile + 1, active=active + 1)
+            )
+
     def remap(self, profile: int, button: int | str, action: int | str, *, verify: bool = True,
-              allow_unknown: bool = False) -> int:
-        """Set one button of onboard ``profile`` and read it back."""
+              allow_unknown: bool = False, checked_active: bool = False) -> int:
+        """Set one button of onboard ``profile`` (must be the active one) and read it back."""
         packet = remap_packet(profile, button, action, allow_unknown=allow_unknown)
         code = packet[8]
         bid = packet[6]
         with self.locked():
+            if not checked_active:
+                self.require_active_for_remap(profile)
             self.transact(packet, REPLY_OK)
             if self.dry_run or not verify:
                 return code
             got = self.read_button(profile, bid)
         if got != code:
             raise VerificationError(
-                f"tasto {BUTTON_NAMES[bid]} del profilo {profile}: letto {format_action(got)}, atteso {format_action(code)}"
+                _("button {button} of profile {n}: read {got}, expected {want}", button=BUTTON_NAMES[bid], n=profile + 1,
+                  got=format_action(got), want=format_action(code))
             )
         return code
 
     def remap_reset(self, profile: int, *, verify: bool = True) -> None:
         """Restore the factory button map of ``profile`` (CAM's order)."""
         with self.locked():
+            self.require_active_for_remap(profile)
             for bid, code in FACTORY_REMAP:
-                self.remap(profile, bid, code, verify=verify)
+                self.remap(profile, bid, code, verify=verify, checked_active=True)
 
     def apply_profile(self, target: Profile, *, verify: bool = True, current: Profile | None = None) -> Profile:
         """Make onboard slot ``target.index`` look like ``target``.
@@ -784,6 +859,9 @@ class LiftElite:
         with self.locked():
             cur = current or self.read_profile(target.index, with_buttons=target.buttons is not None)
             body_changed = cur.known_body() != target.known_body()
+            if button_changes(cur, target):
+                # Before writing anything of this slot (body included).
+                self.require_active_for_remap(target.index)
             result = cur
             if body_changed:
                 # keep unknown trailing bytes from the device's current packet
@@ -797,7 +875,8 @@ class LiftElite:
                     want = target.buttons.get(name)
                     if want is None or (cur.buttons is not None and cur.buttons.get(name) == want):
                         continue
-                    new_buttons[name] = self.remap(target.index, name, want, verify=verify, allow_unknown=True)
+                    new_buttons[name] = self.remap(target.index, name, want, verify=verify, allow_unknown=True,
+                                                   checked_active=True)
                 result = result.with_buttons(new_buttons)
         return result
 
@@ -816,7 +895,7 @@ class LiftElite:
                 if not 0 <= index < 5:
                     from .errors import ValidationError
 
-                    raise ValidationError(f"profilo interno {index} non valido (0..4)")
+                    raise ValidationError(_("invalid internal profile {index} (0..4)", index=index))
                 current = self.read_profile(index, with_buttons=False)
                 want = FACTORY_LED_COLORS[index]
                 if current.color == want:
@@ -824,6 +903,58 @@ class LiftElite:
                     continue
                 results.append(self.write_profile_body(current.with_changes(color=want), verify=verify))
         return results
+
+    def factory_target(self, current: Profile) -> Profile:
+        """``current`` with the factory defaults applied.
+
+        Button map: CAM's factory reset. Body (DPI stages, active stage,
+        polling, lift-off, motion sync, LED colour): the firmware's default
+        profile table, see FACTORY_SETTINGS. DPI values are only written when
+        the profile has the factory stage count (5).
+        """
+        target = current.with_changes(color=FACTORY_LED_COLORS[current.index])
+        if FACTORY_SETTINGS is not None:
+            fields = dict(FACTORY_SETTINGS[current.index])
+            if current.stage_count != len(fields.get("dpi", ())):
+                fields.pop("dpi", None)
+                fields.pop("stage", None)
+            target = target.with_changes(**fields)
+        return target.with_buttons(factory_buttons())
+
+    def reset_defaults(
+        self, *, verify: bool = True, backup: Callable[[list[Profile]], object] | None = None,
+        progress: Callable[[int, Profile], None] | None = None,
+    ) -> "ResetResult":
+        """Restore the known factory defaults of all five profiles.
+
+        Uses only the normal, verified write path (0x93 body, 0x50 buttons,
+        each read back) plus 0x45 to make each profile active while its
+        buttons are written (0x50 always lands in the active profile). No
+        firmware reset routine, no other command. Order, under the device
+        lock: read the active profile (0x44) → read all five profiles →
+        ``backup(profiles)`` → for each slot: activate it if its buttons need
+        writing, write and verify → finally re-activate the profile that was
+        active before (verified with 0x44).
+        """
+        with self.locked():
+            before = self.read_active_profile()
+            current = [self.read_profile(i, with_buttons=True) for i in range(5)]
+            saved = backup(current) if backup is not None and not self.dry_run else None
+            results: list[Profile] = []
+            activated: list[int] = []
+            try:
+                for cur in current:
+                    target = self.factory_target(cur)
+                    if button_changes(cur, target):
+                        self.activate_profile(cur.index, verify=verify)
+                        activated.append(cur.index)
+                    results.append(self.apply_profile(target, verify=verify, current=cur))
+                    if progress is not None:
+                        progress(cur.index, results[-1])
+            finally:
+                if activated:
+                    self.activate_profile(before, verify=verify)
+        return ResetResult(results=results, active=before, activated=activated, backup=saved)
 
     def apply_config(self, index: int, config: ProfileConfig, *, verify: bool = True) -> Profile:
         """Read slot ``index``, apply ``config`` (only its fields), write, verify."""
@@ -835,6 +966,61 @@ class LiftElite:
     # 0.1 compatibility
     def write_profile(self, profile: Profile, *, verify: bool = True) -> Profile:
         return self.apply_profile(profile, verify=verify)
+
+
+@dataclass(frozen=True)
+class ResetResult:
+    """Outcome of :meth:`LiftElite.reset_defaults` (internal slots)."""
+
+    results: list[Profile]
+    active: int  # active before the reset, restored at the end
+    activated: list[int]  # slots made active to write their buttons
+    backup: object | None
+
+
+# Factory body of each profile, from the mouse firmware's own "reset all
+# profiles" routine (Mouse_App v1.01.0005, loaded at 0x29000):
+# FUN_0003403c copies a 0x31-byte template at 0x3bcfb into every profile
+# slot (RAM struct, 0x31 bytes per profile), then sets the active-stage byte
+# to the profile index and the LED colour from the table at 0x3bd2c
+# (1f00 00f8 e007 40fd 1ff8, the known factory colours). Template:
+#   05 | 02 | 9001 2003 4006 800c 0019 | e803 | 01 | 0f | 0000 | 01
+#   count, stage(overwritten), DPI 400/800/1600/3200/6400 (u16le),
+#   polling 1000 Hz (u16le Hz; 0x92 turns it into code 2), lift-off 1,
+#   stage mask 0x0f, colour (from the table), motion sync on.
+# The struct offsets match what the 0x92/0x93 handlers (app_cmd.c) read and
+# write. The same template is in the updater and dongle images. Stage count
+# (5) and mask (0x0f) are never written by this library; with_changes()
+# keeps them.
+FACTORY_DPI = (400, 800, 1600, 3200, 6400)
+FACTORY_SETTINGS: tuple[dict, ...] | None = tuple(
+    {"polling_hz": 1000, "liftoff": 1, "dpi": FACTORY_DPI, "stage": slot + 1, "motion_sync": True}
+    for slot in range(5)
+)
+
+
+@dataclass(frozen=True)
+class ActivateResult:
+    """Outcome of :meth:`LiftElite.activate_profile` (internal slots)."""
+
+    before: int
+    after: int | None  # None in dry-run
+    sent: bytes | None  # None when the profile was already active
+    reply: bytes | None
+    refreshed: "Profile | None" = None  # body re-sent (0x93) after the switch, read back
+
+
+def button_changes(current: Profile, target: Profile) -> list[str]:
+    """Names of the buttons ``apply_profile`` would write for ``target``."""
+    if target.buttons is None:
+        return []
+    out = []
+    for name in BUTTON_NAMES:
+        want = target.buttons.get(name)
+        if want is None or (current.buttons is not None and current.buttons.get(name) == want):
+            continue
+        out.append(name)
+    return out
 
 
 def _stderr_debug(label: str, data: bytes) -> None:

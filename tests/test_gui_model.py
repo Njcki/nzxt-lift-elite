@@ -62,6 +62,7 @@ class EditorTest(unittest.TestCase):
         self.assertIn("1000 → 500 Hz", text)
         self.assertIn("Stadio 2: 800 → 1250 DPI", text)
         self.assertIn("Laterale avanti: Mouse avanti → Volume su", text)
+        self.session._fake.emulator.active_profile = 1  # buttons: active profile only
         results, backup = self.session.apply([m.drafts[i] for i in m.dirty_slots()])
         self.assertIsNone(backup)  # no backups in mock mode
         for p in results:

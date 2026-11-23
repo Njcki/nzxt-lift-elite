@@ -17,7 +17,8 @@ Frame layout (CAM's frame builder)::
 
 The device often answers ``4e e5 …`` (busy/ack) first; that is skipped.
 
-This module is pure encoding/decoding with no I/O. See PROTOCOL.md for where each field comes from and how sure we are.
+This module is pure encoding/decoding with no I/O. See PROTOCOL.md and
+FIRMWARE_UPDATE.md for where each field comes from and how sure we are.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 
 from . import actions as _actions
 from .errors import DangerousCommandError, ProtocolError, ValidationError
+from .i18n import _
 
 PACKET_SIZE = 64
 MAGIC = 0x4E
@@ -102,11 +104,12 @@ CMD_WRITE_BUTTON = 0x50  # 4e 02 85 00 50 PP BB 04 AA -> 4e 02 82 00 01
 
 # 0x44 / 0x45 are the firmware get/set pair for the onboard active profile
 # (CAM names: CMD_GET_PROFILE_NUMBER / CMD_SET_PROFILE_NUMBER). Firmware
-# (app_cmd.c case 0x44 / 0x45, FUN_000340f0) and a USB capture of CAM confirm the
-# packet shapes. 0x45 is documented but is NOT a safe command: writing it
-# stays disabled until the user confirms 0x44 on the real mouse
-# (`liftctl debug-dump`, long-press the purple button, dump again).
-ENABLE_ACTIVE_PROFILE_APPLY = False
+# (app_cmd.c case 0x44 / 0x45, FUN_000340f0) and a CAM pcap confirm the
+# packet shapes. 0x45 is NOT in SAFE_COMMANDS: it is sent only through the
+# explicit allowlist (exact `4e 02 82 00 45 PP` packet) by
+# LiftElite.activate_profile — `liftctl activate` and, with this flag on, the
+# GUI's "Rendi attivo" + Applica. Confirmed on the real mouse 2026-11-23.
+ENABLE_ACTIVE_PROFILE_APPLY = True  # confirmed on the real mouse with `liftctl activate` (2026-11-23)
 
 PROFILE_BODY_LEN = KNOWN_BODY_END - BODY_START  # 18 known bytes
 REMAP_TYPE = 0x04
@@ -125,7 +128,7 @@ REPLY_READ_BUTTON_HDR = bytes((0x4E, TARGET_MOUSE, 0x85, 0x00, 0x01))
 CMD_WRITE_PROFILE_HDR = bytes((0x4E, TARGET_MOUSE, 0x94, 0x00, CMD_WRITE_PROFILE))
 
 # --- DANGEROUS: firmware / boot commands ------------------------------------
-# These were decoded from CAM and the firmware. The
+# These were decoded from CAM and the firmware (FIRMWARE_UPDATE.md). The
 # update procedure is NOT verified on hardware (the mouse never entered its
 # updater during CAM's attempts). The library refuses to send any of them:
 # LiftElite._write raises DangerousCommandError. Do not remove that guard
@@ -181,8 +184,35 @@ def command_of(packet: bytes) -> int | None:
     return None
 
 
-def assert_safe_packet(packet: bytes) -> None:
-    """Raise unless ``packet`` is one of the known, safe commands."""
+#: Commands outside SAFE_COMMANDS that one explicit code path may send when it
+#: passes ``allow=``. Only 0x45 (set active profile), used by
+#: ``LiftElite.activate_profile`` (``liftctl activate``) and, once
+#: ENABLE_ACTIVE_PROFILE_APPLY is on, by the GUI's Applica.
+EXPLICIT_ALLOWLIST = frozenset({CMD_SET_ACTIVE_PROFILE})
+
+
+def _check_set_active_profile(packet: bytes) -> None:
+    """0x45 must be exactly ``4e 02 82 00 45 PP`` + zero padding, PP 0..4."""
+    ok = (
+        len(packet) == PACKET_SIZE
+        and packet[1] == TARGET_MOUSE
+        and packet[2] == 0x82
+        and packet[3] == 0x00
+        and packet[5] <= 4
+        and not any(packet[6:])
+    )
+    if not ok:
+        raise DangerousCommandError(f"invalid 0x45 packet: {packet[:8].hex(' ')}")
+
+
+def assert_safe_packet(packet: bytes, *, allow: frozenset[int] = frozenset()) -> None:
+    """Raise unless ``packet`` is one of the known, safe commands.
+
+    ``allow`` may only contain commands from :data:`EXPLICIT_ALLOWLIST`;
+    firmware/boot commands can never be allowed.
+    """
+    if not allow <= EXPLICIT_ALLOWLIST:
+        raise DangerousCommandError(f"allowlist not permitted: {sorted(hex(c) for c in allow)}")
     if len(packet) < 5 or packet[0] != MAGIC or packet[1] not in (TARGET_MOUSE, TARGET_DONGLE):
         raise DangerousCommandError(f"refusing to send a malformed packet: {packet[:5].hex()}")
     cmd = packet[4]
@@ -191,6 +221,10 @@ def assert_safe_packet(packet: bytes) -> None:
             f"refusing to send firmware/boot command 0x{cmd:02x}: the update "
             "procedure is unverified and could brick the mouse"
         )
+    if cmd in allow:
+        if cmd == CMD_SET_ACTIVE_PROFILE:
+            _check_set_active_profile(packet)
+        return
     if cmd not in SAFE_COMMANDS:
         raise DangerousCommandError(f"refusing to send unknown command 0x{cmd:02x}")
     if packet[1] == TARGET_DONGLE and cmd != CMD_INFO:
@@ -326,13 +360,13 @@ def validate_dpi_list(values, count: int = DPI_STAGE_COUNT) -> list[int]:
 
 
 def polling_warning(hz: int, transport: str | None = None) -> str | None:
-    """Short Italian warning for rates that depend on the connection."""
+    """Short (translated) warning for rates that depend on the connection."""
     if hz == WIRED_ONLY_HZ:
         if transport == "wireless":
-            return "8000 Hz funziona solo via cavo: in wireless il mouse userà al massimo 4000 Hz."
-        return "8000 Hz funziona solo con il mouse collegato via cavo; in wireless il massimo è 4000 Hz."
+            return _("8000 Hz works only wired: in wireless the mouse uses 4000 Hz at most.")
+        return _("8000 Hz works only with the mouse connected by cable; in wireless the maximum is 4000 Hz.")
     if hz == WIRELESS_MAX_HZ and transport != "wired":
-        return "4000 Hz è il massimo con il ricevitore; 8000 Hz è disponibile solo via cavo."
+        return _("4000 Hz is the maximum with the receiver; 8000 Hz is available only wired.")
     return None
 
 

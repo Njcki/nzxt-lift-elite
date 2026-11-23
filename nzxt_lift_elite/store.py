@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import ValidationError
+from .i18n import _
 from .profile import (
     profiles_document,
     Profile,
@@ -43,7 +44,7 @@ def slugify(name: str) -> str:
     text = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^A-Za-z0-9._-]+", "-", text).strip("-._").lower()
     if not text:
-        raise ValidationError(f"nome profilo non valido: {name!r}")
+        raise ValidationError(_("invalid profile name: {name}", name=repr(name)))
     return text[:64]
 
 
@@ -92,7 +93,7 @@ class ProfileStore:
         """
         path = self.path_for(name)
         if path.exists() and not overwrite:
-            raise ValidationError(f"esiste già un profilo chiamato {name!r}")
+            raise ValidationError(_("a profile called {name} already exists", name=repr(name)))
         doc = profiles_document([profile], name=name.strip(), include_index=False)
         if not include_color:
             for entry in doc["profiles"]:
@@ -104,16 +105,16 @@ class ProfileStore:
     def load_named(self, name: str) -> ProfileConfig:
         path = self.path_for(name)
         if not path.is_file():
-            raise ValidationError(f"profilo {name!r} non trovato in {self.profiles_dir}")
+            raise ValidationError(_("profile {name} not found in {path}", name=repr(name), path=self.profiles_dir))
         configs = load_profiles_json(path)
         if len(configs) != 1:
-            raise ValidationError(f"{path} contiene {len(configs)} profili, ne serve uno")
+            raise ValidationError(_("{path} contains {n} profiles, one is needed", path=path, n=len(configs)))
         return configs[0]
 
     def delete_named(self, name: str) -> None:
         path = self.path_for(name)
         if not path.is_file():
-            raise ValidationError(f"profilo {name!r} non trovato")
+            raise ValidationError(_("profile {name} not found", name=repr(name)))
         path.unlink()
 
     def list_named(self) -> list[NamedProfile]:

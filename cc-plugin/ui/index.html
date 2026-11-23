@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
   <title>NZXT Lift Elite</title>
@@ -31,11 +31,10 @@
 </head>
 <body>
   <h2>NZXT Lift Elite</h2>
-  <p class="muted">Plugin non ufficiale. I canali del dispositivo <b>Lift Elite</b> (stadio DPI, polling,
-    lift-off, motion sync, LED del profilo) modificano <b>un</b> profilo memorizzato nel mouse: scegli quale.</p>
+  <p class="muted" data-i18n-html="intro"></p>
 
   <div class="row">
-    <span class="lbl">Profilo da comandare</span>
+    <span class="lbl" data-i18n="slotLabel"></span>
     <span class="seg" id="slots">
       <label><input type="radio" name="slot" value="0"><span><i class="dot" style="background:#3b82f6"></i>1</span></label>
       <label><input type="radio" name="slot" value="1"><span><i class="dot" style="background:#ef4444"></i>2</span></label>
@@ -45,22 +44,62 @@
     </span>
   </div>
   <div class="row">
-    <button class="btn" id="save">Salva</button><span id="msg"></span>
+    <button class="btn" id="save" data-i18n="save"></button><span id="msg"></span>
   </div>
 
   <ul class="muted">
-    <li>I puntini colorati sono i colori di fabbrica di ciascun profilo (blu, rosso, verde, giallo, viola).
-      In CoolerControl puoi anche impostare il colore del LED del profilo scelto (si vede per circa due
-      secondi quando cambi profilo tenendo premuto il tasto viola). Per riportare i cinque colori di
-      fabbrica usa <code>liftctl restore-led-colors</code>. Il profilo attivo non si può leggere né
-      scegliere via USB: scegli qui quello che usi.</li>
-    <li>Dopo il salvataggio riavvia il plugin o CoolerControl (<code>sudo systemctl restart coolercontrold</code>)
-      perché le etichette dei canali mostrino il nuovo profilo; le modifiche vanno comunque già al profilo scelto.</li>
-    <li>8000 Hz funziona solo con il cavo. Il plugin scrive solo se il valore cambia e poi rilegge il mouse.</li>
-    <li>Se scolleghi e ricolleghi il cavo o il ricevitore, il plugin se ne accorge e riapre il dispositivo da solo (preferisce il cavo se sono presenti entrambi). Non scrive nulla in automatico.</li>
-    <li>Per DPI dei singoli stadi, tasti e profili con nome usa <code>lift-elite-control</code> o <code>liftctl</code>.</li>
+    <li data-i18n-html="tipColors"></li>
+    <li data-i18n-html="tipRestart"></li>
+    <li data-i18n="tipPolling"></li>
+    <li data-i18n="tipHotplug"></li>
+    <li data-i18n-html="tipTools"></li>
   </ul>
 
+<script type="text/javascript">
+  // Language: ?lang=it|en, else the browser/system language (it* → Italian, otherwise English).
+  const I18N = {
+    en: {
+      intro: 'Unofficial plugin. The channels of the <b>Lift Elite</b> device (DPI stage, polling, lift-off, motion sync, profile LED) change <b>one</b> profile stored in the mouse: choose which one.',
+      slotLabel: 'Profile to control',
+      save: 'Save',
+      tipColors: 'The coloured dots are the factory colours of each profile (blue, red, green, yellow, purple). In CoolerControl you can also set the LED colour of the chosen profile (it shows for about two seconds when you change profile by holding the purple button). To bring back the five factory colours use <code>liftctl restore-led-colors</code>. The plugin does not follow the profile that is active on the mouse: choose here the one you use.',
+      tipRestart: 'After saving, restart the plugin or CoolerControl (<code>sudo systemctl restart coolercontrold</code>) so the channel labels show the new profile; changes already go to the chosen profile anyway.',
+      tipPolling: '8000 Hz works only with the cable. The plugin writes only when a value changes and then reads the mouse back.',
+      tipHotplug: 'If you unplug and replug the cable or the receiver, the plugin notices and reopens the device by itself (it prefers the cable when both are present). It never writes anything automatically.',
+      tipTools: 'For per-stage DPI, buttons and named profiles use <code>lift-elite-control</code> or <code>liftctl</code>.',
+      saving: 'Saving…',
+      saved: 'Saved ✔ profile ',
+      notSaved: 'CoolerControl did not save the settings. Try again.',
+      noAnswer: 'No answer from CoolerControl: settings not saved.',
+      notLoaded: 'Saved settings not loaded (no answer from CoolerControl).',
+    },
+    it: {
+      intro: 'Plugin non ufficiale. I canali del dispositivo <b>Lift Elite</b> (stadio DPI, polling, lift-off, motion sync, LED del profilo) modificano <b>un</b> profilo memorizzato nel mouse: scegli quale.',
+      slotLabel: 'Profilo da comandare',
+      save: 'Salva',
+      tipColors: 'I puntini colorati sono i colori di fabbrica di ciascun profilo (blu, rosso, verde, giallo, viola). In CoolerControl puoi anche impostare il colore del LED del profilo scelto (si vede per circa due secondi quando cambi profilo tenendo premuto il tasto viola). Per riportare i cinque colori di fabbrica usa <code>liftctl restore-led-colors</code>. Il plugin non segue il profilo attivo sul mouse: scegli qui quello che usi.',
+      tipRestart: 'Dopo il salvataggio riavvia il plugin o CoolerControl (<code>sudo systemctl restart coolercontrold</code>) perché le etichette dei canali mostrino il nuovo profilo; le modifiche vanno comunque già al profilo scelto.',
+      tipPolling: '8000 Hz funziona solo con il cavo. Il plugin scrive solo se il valore cambia e poi rilegge il mouse.',
+      tipHotplug: 'Se scolleghi e ricolleghi il cavo o il ricevitore, il plugin se ne accorge e riapre il dispositivo da solo (preferisce il cavo se sono presenti entrambi). Non scrive nulla in automatico.',
+      tipTools: 'Per DPI dei singoli stadi, tasti e profili con nome usa <code>lift-elite-control</code> o <code>liftctl</code>.',
+      saving: 'Salvataggio…',
+      saved: 'Salvato ✔ profilo ',
+      notSaved: 'CoolerControl non ha salvato le impostazioni. Riprova.',
+      noAnswer: 'Nessuna risposta da CoolerControl: impostazioni non salvate.',
+      notLoaded: 'Impostazioni salvate non caricate (nessuna risposta da CoolerControl).',
+    },
+  }
+  const pickLang = () => {
+    const q = new URLSearchParams(location.search).get('lang')
+    const cand = [q, ...(navigator.languages || []), navigator.language].filter(Boolean)
+    return cand.length && String(cand[0]).toLowerCase().startsWith('it') ? 'it' : 'en'
+  }
+  const LANG = pickLang()
+  const T = (k) => (I18N[LANG] && I18N[LANG][k]) || I18N.en[k]
+  document.documentElement.lang = LANG
+  document.querySelectorAll('[data-i18n]').forEach((el) => { el.textContent = T(el.dataset.i18n) })
+  document.querySelectorAll('[data-i18n-html]').forEach((el) => { el.innerHTML = T(el.dataset.i18nHtml) })
+</script>
 <script type="text/javascript">
   const TIMEOUT_MS = 10000
   const byId = (id) => document.getElementById(id)
@@ -77,13 +116,13 @@
     saving = true
     lastSaveOk = false
     byId('save').disabled = true
-    say('Salvataggio…')
+    say(T('saving'))
     try {
       await withTimeout(savePluginConfig({ profile_slot: selected() }), TIMEOUT_MS)
-      if (lastSaveOk) say('Salvato ✔ profilo ' + (selected() + 1))
-      else say('CoolerControl non ha salvato le impostazioni. Riprova.', true)
+      if (lastSaveOk) say(T('saved') + (selected() + 1))
+      else say(T('notSaved'), true)
     } catch (e) {
-      say('Nessuna risposta da CoolerControl: impostazioni non salvate.', true)
+      say(T('noAnswer'), true)
     } finally {
       saving = false
       byId('save').disabled = false
@@ -99,7 +138,7 @@
       const cfg = await withTimeout(getPluginConfig(), TIMEOUT_MS)
       if (cfg && Number.isInteger(cfg.profile_slot) && cfg.profile_slot >= 0 && cfg.profile_slot <= 4) select(cfg.profile_slot)
     } catch (e) {
-      say('Impostazioni salvate non caricate (nessuna risposta da CoolerControl).', true)
+      say(T('notLoaded'), true)
     }
   }
 

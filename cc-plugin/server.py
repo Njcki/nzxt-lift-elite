@@ -45,6 +45,7 @@ from nzxt_lift_elite import __version__ as LIB_VERSION  # noqa: E402
 from nzxt_lift_elite.device import LiftElite, find_hidraw  # noqa: E402
 from nzxt_lift_elite.hotplug import Monitor, scan  # noqa: E402
 from nzxt_lift_elite.errors import LiftEliteError  # noqa: E402
+from nzxt_lift_elite.i18n import _  # noqa: E402
 from nzxt_lift_elite.profile import Profile  # noqa: E402
 from nzxt_lift_elite.protocol import (  # noqa: E402
     DPI_STAGE_COUNT,
@@ -189,21 +190,21 @@ class PluginCore:
         dpi = profile.dpi_stages if profile is not None else ()
         stage_modes = []
         for n in range(1, DPI_STAGE_COUNT + 1):
-            label = f"Stage {n}"
+            label = _("Stage {n}", n=n)
             if len(dpi) >= n:
                 label += f" · {dpi[n - 1]} DPI"
             stage_modes.append(Mode(f"stage-{n}", label))
         slot = self.slot() + 1
         polling = []
         for hz in POLLING_HZ.values():
-            note = " (cable only)" if hz == 8000 else ""
+            note = " (" + _("cable only") + ")" if hz == 8000 else ""
             polling.append(Mode(f"{hz}hz", f"{hz} Hz{note}"))
         return [
-            Channel("dpi_stage", f"DPI stage (profile {slot})", tuple(stage_modes)),
-            Channel("polling", f"Polling rate (profile {slot})", tuple(polling)),
-            Channel("liftoff", f"Lift-off (profile {slot})", tuple(Mode(f"{v}mm", f"{v} mm") for v in LIFTOFF_VALUES)),
-            Channel("motion_sync", f"Motion sync (profile {slot})", (Mode("on", "On"), Mode("off", "Off"))),
-            Channel("profile_led", f"Profile LED (profile {slot})", (Mode("static", "Static colour", colors=1),)),
+            Channel("dpi_stage", _("DPI stage (profile {n})", n=slot), tuple(stage_modes)),
+            Channel("polling", _("Polling rate (profile {n})", n=slot), tuple(polling)),
+            Channel("liftoff", _("Lift-off (profile {n})", n=slot), tuple(Mode(f"{v}mm", f"{v} mm") for v in LIFTOFF_VALUES)),
+            Channel("motion_sync", _("Motion sync (profile {n})", n=slot), (Mode("on", _("On")), Mode("off", _("Off")))),
+            Channel("profile_led", _("Profile LED (profile {n})", n=slot), (Mode("static", _("Static colour"), colors=1),)),
         ]
 
     # --- writes -----------------------------------------------------------

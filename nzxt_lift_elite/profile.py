@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import ValidationError
+from .i18n import _
 from .protocol import (
     BUTTON_NAMES,
     DPI_STAGE_COUNT,
@@ -212,20 +213,20 @@ def diff_profiles(expected: Profile, actual: Profile) -> list[str]:
     if expected.liftoff != actual.liftoff:
         problems.append(f"lift-off {actual.liftoff} != {expected.liftoff}")
     if expected.stage != actual.stage:
-        problems.append(f"stadio DPI {actual.stage} != {expected.stage}")
+        problems.append(_("DPI stage") + f" {actual.stage} != {expected.stage}")
     if expected.dpi_stages != actual.dpi_stages:
-        problems.append(f"stadi DPI {list(actual.dpi_stages)} != {list(expected.dpi_stages)}")
+        problems.append(_("DPI stage list") + f" {list(actual.dpi_stages)} != {list(expected.dpi_stages)}")
     if expected.motion_sync != actual.motion_sync:
         problems.append(f"motion sync {actual.motion_sync} != {expected.motion_sync}")
     if expected.color != actual.color:
-        problems.append(f"colore {actual.color.hex()} != {expected.color.hex()}")
+        problems.append(_("colour") + f" {actual.color.hex()} != {expected.color.hex()}")
     if expected.known_body() != actual.known_body() and not problems:
         problems.append(f"body {actual.known_body().hex()} != {expected.known_body().hex()}")
     if expected.buttons is not None and actual.buttons is not None:
         for b in BUTTON_NAMES:
             if b in expected.buttons and expected.buttons[b] != actual.buttons.get(b):
                 problems.append(
-                    f"tasto {b}: {format_action(actual.buttons.get(b, -1) & 0xFF)} != {format_action(expected.buttons[b])}"
+                    _("button") + f" {b}: {format_action(actual.buttons.get(b, -1) & 0xFF)} != {format_action(expected.buttons[b])}"
                 )
     return problems
 
@@ -235,8 +236,8 @@ def profiles_document(profiles: Iterable[Profile], *, name: str | None = None, i
     if name:
         doc["name"] = name
     doc["note"] = (
-        "Protocollo non ufficiale, ricavato da NZXT CAM. Ogni campo è facoltativo: "
-        "un caricamento cambia solo i campi presenti."
+        "Unofficial protocol, worked out from NZXT CAM. Every field is optional: "
+        "loading changes only the fields present."
     )
     doc["profiles"] = [p.to_json_dict(include_index=include_index) for p in profiles]
     return doc
@@ -270,7 +271,7 @@ class ProfileConfig:
         dpi = self.dpi_stages
         if dpi is not None and len(dpi) != profile.stage_count:
             raise ValidationError(
-                f"il file ha {len(dpi)} stadi DPI, il profilo del mouse ne ha {profile.stage_count}"
+                _("the file has {n} DPI stages, the mouse profile has {m}", n=len(dpi), m=profile.stage_count)
             )
         # Named profiles omit colour (save_named include_color=False), so
         # loading one into another slot leaves that slot's LED unchanged.
@@ -333,7 +334,7 @@ def _optional_int(value: Any, field_name: str) -> int | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValidationError(f"{field_name} deve essere un intero, trovato {value!r}")
+        raise ValidationError(_("{field} must be an integer, got {value}", field=field_name, value=repr(value)))
     return value
 
 
@@ -341,20 +342,20 @@ def _parse_indicator(value: Any) -> bytes | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValidationError('indicator deve essere una stringa esadecimale di 4 cifre, es. "1f00"')
+        raise ValidationError(_('indicator must be a 4-digit hex string, e.g. "1f00"'))
     text = value.strip().lower().removeprefix("0x")
     try:
         data = bytes.fromhex(text)
     except ValueError as exc:
-        raise ValidationError(f"indicator non valido: {value!r}") from exc
+        raise ValidationError(_("invalid indicator: {value}", value=repr(value))) from exc
     if len(data) != 2:
-        raise ValidationError("indicator deve essere di 2 byte (4 cifre esadecimali)")
+        raise ValidationError(_("indicator must be 2 bytes (4 hex digits)"))
     return data
 
 
 def profile_config_from_dict(data: dict[str, Any], *, allow_unknown_actions: bool = False) -> ProfileConfig:
     if not isinstance(data, dict):
-        raise ValidationError("ogni profilo deve essere un oggetto JSON")
+        raise ValidationError(_("every profile must be a JSON object"))
     unknown = set(data) - _KNOWN_KEYS
     if unknown:
         raise ValidationError(f"chiavi JSON sconosciute: {', '.join(sorted(unknown))}")
@@ -373,7 +374,7 @@ def profile_config_from_dict(data: dict[str, Any], *, allow_unknown_actions: boo
     if data.get("dpi_stages") is not None:
         raw = data["dpi_stages"]
         if not isinstance(raw, list):
-            raise ValidationError("dpi_stages deve essere una lista di 5 interi")
+            raise ValidationError(_("dpi_stages must be a list of 5 integers"))
         parsed_dpi = tuple(validate_dpi_list(raw, DPI_STAGE_COUNT))
 
     dpi_stage = _optional_int(data.get("dpi_stage"), "dpi_stage")
@@ -382,24 +383,24 @@ def profile_config_from_dict(data: dict[str, Any], *, allow_unknown_actions: boo
 
     overrides_raw = data.get("dpi_stage_overrides") or {}
     if not isinstance(overrides_raw, dict):
-        raise ValidationError('dpi_stage_overrides deve essere un oggetto {"1": 800, ...}')
+        raise ValidationError(_('dpi_stage_overrides must be an object {"1": 800, ...}'))
     overrides: dict[int, int] = {}
     for key, value in overrides_raw.items():
         try:
             stage = int(key)
         except (TypeError, ValueError) as exc:
-            raise ValidationError(f"stadio DPI non valido {key!r}") from exc
+            raise ValidationError(_("invalid DPI stage {value}", value=repr(key))) from exc
         validate_stage(stage, DPI_STAGE_COUNT)
         overrides[stage] = validate_dpi_value(value)
 
     motion = data.get("motion_sync")
     if motion is not None and not isinstance(motion, bool):
-        raise ValidationError("motion_sync deve essere true o false")
+        raise ValidationError(_("motion_sync must be true or false"))
 
     indicator = None
     if data.get("color") is not None:
         if not isinstance(data["color"], str):
-            raise ValidationError('color deve essere "#rrggbb"')
+            raise ValidationError(_('color must be "#rrggbb"'))
         indicator = parse_color(data["color"])
     elif data.get("indicator") is not None:
         indicator = _parse_indicator(data.get("indicator"))
@@ -409,7 +410,7 @@ def profile_config_from_dict(data: dict[str, Any], *, allow_unknown_actions: boo
     if buttons is None:
         parsed_buttons = None
     elif not isinstance(buttons, dict):
-        raise ValidationError("buttons deve essere un oggetto o null")
+        raise ValidationError(_("buttons must be an object or null"))
     else:
         for name in buttons:
             parse_button(name)
@@ -417,7 +418,7 @@ def profile_config_from_dict(data: dict[str, Any], *, allow_unknown_actions: boo
 
     name = data.get("name")
     if name is not None and not isinstance(name, str):
-        raise ValidationError("name deve essere una stringa")
+        raise ValidationError(_("name must be a string"))
 
     return ProfileConfig(
         index=index,
@@ -441,22 +442,22 @@ def parse_profiles_document(raw: Any, *, allow_unknown_actions: bool = False) ->
     elif isinstance(raw, dict) and "profiles" in raw:
         fmt = raw.get("format")
         if fmt is not None and fmt not in JSON_FORMATS_ACCEPTED:
-            raise ValidationError(f"formato JSON {fmt} non supportato (attesi {JSON_FORMATS_ACCEPTED})")
+            raise ValidationError(_("JSON format {fmt} not supported (expected {ok})", fmt=fmt, ok=JSON_FORMATS_ACCEPTED))
         usb = raw.get("usb")
         if usb is not None:
             usbs = usb if isinstance(usb, list) else [usb]
             if not any(str(u).lower() in JSON_USB_ACCEPTED for u in usbs):
-                raise ValidationError(f"il file è per il dispositivo USB {usb}, non per il Lift Elite")
+                raise ValidationError(_("the file is for USB device {usb}, not for the Lift Elite", usb=usb))
         entries = raw["profiles"]
         doc_name = raw.get("name") if isinstance(raw.get("name"), str) else None
         if not isinstance(entries, list):
-            raise ValidationError("profiles deve essere un array JSON")
+            raise ValidationError(_("profiles must be a JSON array"))
     elif isinstance(raw, dict) and (set(raw) & (_KNOWN_KEYS - {"name"})):
         entries = [raw]
     else:
-        raise ValidationError("il JSON deve contenere un array profiles o un singolo profilo")
+        raise ValidationError(_("the JSON must contain a profiles array or a single profile"))
     if not entries:
-        raise ValidationError("il JSON non contiene profili")
+        raise ValidationError(_("the JSON contains no profiles"))
     configs = [profile_config_from_dict(e, allow_unknown_actions=allow_unknown_actions) for e in entries]
     if doc_name:
         configs = [c if c.name else replace(c, name=doc_name) for c in configs]
@@ -467,7 +468,7 @@ def loads_profiles(text: str, **kw: Any) -> list[ProfileConfig]:
     try:
         raw = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValidationError(f"JSON non valido: {exc}") from exc
+        raise ValidationError(_("invalid JSON: {error}", error=exc)) from exc
     return parse_profiles_document(raw, **kw)
 
 
@@ -493,22 +494,22 @@ def select_config(
         by_index: dict[int, ProfileConfig] = {}
         for cfg in configs:
             if cfg.index is None:
-                raise ValidationError("con --all ogni profilo nel file deve avere il campo profile")
+                raise ValidationError(_("with --all every profile in the file needs the profile field"))
             by_index[cfg.index] = cfg
         missing = [i for i in range(PROFILE_COUNT) if i not in by_index]
         if missing:
             raise ValidationError(
-                f"--all richiede tutti e 5 i profili nel file; mancano: {', '.join(map(str, missing))}"
+                _("--all needs all 5 profiles in the file; missing: {missing}", missing=", ".join(map(str, missing)))
             )
         return [(i, by_index[i]) for i in range(PROFILE_COUNT)]
     if profile_index is None:
-        raise ValidationError("indica --profile N oppure --all")
+        raise ValidationError(_("give --profile N or --all"))
     validate_profile_index(profile_index)
     matching = [c for c in configs if c.index == profile_index]
     if len(matching) == 1:
         return [(profile_index, matching[0])]
     if len(matching) > 1:
-        raise ValidationError(f"il file contiene più di una voce per il profilo {profile_index}")
+        raise ValidationError(_("the file has more than one entry for profile {n}", n=profile_index))
     if len(configs) == 1:
         return [(profile_index, configs[0])]
-    raise ValidationError(f"il file non ha una voce per il profilo {profile_index} e ne contiene più di una")
+    raise ValidationError(_("the file has no entry for profile {n} and contains more than one", n=profile_index))

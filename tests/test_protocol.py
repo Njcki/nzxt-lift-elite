@@ -176,7 +176,7 @@ class CommandsTest(unittest.TestCase):
         self.assertEqual(set_pkt[:6], bytes.fromhex("4e0282004502"))
         self.assertEqual(uid_packet()[:5], bytes.fromhex("4e02810003"))
         self.assertEqual(id_word_packet()[:5], bytes.fromhex("4e028100b8"))
-        self.assertFalse(ENABLE_ACTIVE_PROFILE_APPLY)
+        self.assertTrue(ENABLE_ACTIVE_PROFILE_APPLY)
         self.assertIn(CMD_GET_ACTIVE_PROFILE, SAFE_COMMANDS)
         self.assertIn(CMD_GET_ACTIVE_PROFILE, READ_ONLY_COMMANDS)
         self.assertNotIn(CMD_SET_ACTIVE_PROFILE, SAFE_COMMANDS)
