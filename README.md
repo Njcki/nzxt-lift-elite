@@ -1,185 +1,235 @@
-# NZXT Lift Elite su Linux
+# NZXT Lift Elite on Linux
 
-Strumenti **non ufficiali** per il mouse **NZXT Lift Elite**, via cavo
-(USB `1e71:2129`) o tramite il ricevitore 2.4 GHz (USB `1e71:2101`):
+*[Leggi in italiano](README.it.md)*
 
-- **Lift Elite Control**: app grafica GTK4/libadwaita, in italiano, per DPI,
-  polling, lift-off, motion sync, tasti e profili con nome
-- **`liftctl`**: riga di comando con le stesse funzioni
-- **plugin CoolerControl** (opzionale): stadio DPI, polling, lift-off, motion
-  sync e LED di un profilo, direttamente dall'interfaccia di CoolerControl
-- **`nzxt_lift_elite`**: la libreria Python che usano tutti e tre
+**Unofficial** tools for the **NZXT Lift Elite** mouse, over the USB cable
+(`1e71:2129`) or the 2.4 GHz receiver (`1e71:2101`):
 
-Il protocollo HID non è documentato da NZXT: è stato ricostruito osservando
-i pacchetti che NZXT CAM invia al mouse (dettagli in [`PROTOCOL.md`](PROTOCOL.md)).
-Non è affiliato a NZXT. Ogni scrittura è letta di nuovo per verificarla e,
-prima di scrivere, il programma salva un backup dei profili. Nessun comando
-di aggiornamento firmware è raggiungibile: la libreria li rifiuta.
+- **Lift Elite Control**: a GTK4/libadwaita app for DPI stages, polling rate,
+  lift-off, motion sync, button mapping and named profiles
+- **`liftctl`**: a command-line tool with the same features
+- **CoolerControl plugin** (optional): DPI stage, polling, lift-off, motion
+  sync and profile LED from inside CoolerControl
+- **`nzxt_lift_elite`**: the Python library all three are built on
+
+NZXT does not document the HID protocol. It was reconstructed by watching what
+NZXT CAM sends to the mouse; see [`PROTOCOL.md`](PROTOCOL.md) and the
+reverse-engineering guide ([English](docs/REVERSE_ENGINEERING.md) ·
+[Italiano](docs/REVERSE_ENGINEERING.it.md)). This project is not affiliated
+with NZXT.
+
+Every write is read back to verify it, and a backup of all profiles is saved
+before writing. Firmware-update commands are unreachable: the library refuses
+them.
 
 ![Lift Elite Control](docs/screenshot.png)
 
-## Installazione su CachyOS (passo per passo)
+## Contents
 
-I comandi sono per **fish**, la shell di CachyOS. Solo quelli con `sudo`
-richiedono la password di amministratore; `makepkg -si` la chiede da solo
-quando installa il pacchetto.
+- [Requirements](#requirements)
+- [Install from source](#install-from-source)
+- [Device permissions (udev)](#device-permissions-udev)
+- [First test](#first-test)
+- [Lift Elite Control (GUI)](#lift-elite-control-gui)
+- [liftctl (command line)](#liftctl-command-line)
+- [CoolerControl plugin](#coolercontrol-plugin)
+- [Arch Linux / CachyOS](#arch-linux--cachyos)
+- [What is not known yet](#what-is-not-known-yet)
+- [Python library](#python-library)
+- [Tests](#tests)
+- [License and disclaimer](#license-and-disclaimer)
 
-**1. Copia la cartella del progetto sul PC** (ad esempio in `~/src/nzxt-lift-elite`)
-ed entra nella cartella del pacchetto:
+## Requirements
 
-```fish
-cd ~/src/nzxt-lift-elite/packaging/arch
-```
+- Linux with the kernel `hidraw` driver (standard everywhere). The tools talk
+  to `/dev/hidraw*` directly; **no hidapi or libusb is needed**.
+- Python **3.10** or newer.
+- For `liftctl` and the library: nothing else (standard library only).
+- For the GUI: **GTK 4**, **libadwaita ≥ 1.5** and **PyGObject**.
+  **pyudev** is recommended for instant hot-plug detection; without it the app
+  polls `/sys/class/hidraw` every 1.5 s.
+- For the CoolerControl plugin: CoolerControl, `grpcio` and `protobuf`, plus
+  `grpcio-tools` to generate the gRPC stubs.
+- For permissions without root: systemd-logind (or elogind) for the `uaccess`
+  udev tag.
 
-**2. Compila e installa** (crea due pacchetti locali, non viene scaricato nulla dall'AUR):
+Typical distribution packages:
 
-```fish
-makepkg -si
-```
+| Distribution | GUI dependencies |
+|---|---|
+| Arch Linux / CachyOS / Manjaro | `python-gobject gtk4 libadwaita python-pyudev` |
+| Debian / Ubuntu | `python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 python3-pyudev` |
+| Fedora | `python3-gobject gtk4 libadwaita python3-pyudev` |
 
-Come utente normale, **senza** `sudo` davanti: alla fine chiede la password per
-`pacman`. Installa `nzxt-lift-elite` (libreria, `liftctl`, l'app, icona, regola udev)
-e `nzxt-lift-elite-coolercontrol` (il plugin). Le dipendenze (`python-gobject`,
-`gtk4`, `libadwaita`, `python-grpcio`…) le installa pacman. In alternativa
-`paru -Ui` nella stessa cartella fa la stessa cosa.
+Package names can vary between releases; what matters is that
+`python3 -c "import gi; gi.require_version('Adw', '1'); from gi.repository import Adw"`
+works.
 
-Se il plugin non ti serve: `makepkg -s` e poi `sudo pacman -U nzxt-lift-elite-0.2.0-1-any.pkg.tar.zst`.
+## Install from source
 
-**3. Permessi sul mouse** — la regola udev è già installata in
-`/usr/lib/udev/rules.d/70-nzxt-lift-elite.rules` e dà accesso all'utente collegato
-(tag `uaccess`, nessun gruppo da aggiungere). Stacca e riattacca il cavo e/o il
-ricevitore, oppure:
+### Option A: run straight from the checkout
 
-```fish
-sudo udevadm control --reload-rules
-sudo udevadm trigger -s hidraw
-```
+No installation needed; the two launchers add the checkout to `sys.path`:
 
-**4. Primo test, di sola lettura** (non scrive nulla sul mouse, senza `sudo`):
-
-```fish
-liftctl show
-```
-
-Deve elencare i 5 profili con polling, lift-off, stadi DPI e tasti. Se dice
-"permesso negato", ripeti il punto 3. Altre verifiche di sola lettura:
-`liftctl devices` (cosa è collegato) e `liftctl firmware-info`.
-
-**5. Apri l'app**: cerca *Lift Elite Control* nel menu di KDE, oppure da terminale
-`lift-elite-control`. All'avvio legge soltanto; scrive solo quando premi
-**Applica** e confermi.
-
-**6. Plugin CoolerControl** (solo se usi CoolerControl e hai installato il secondo pacchetto):
-
-```fish
-sudo systemctl restart coolercontrold
-```
-
-### Disinstallare
-
-```fish
-sudo pacman -R nzxt-lift-elite-coolercontrol nzxt-lift-elite
-```
-
-I profili salvati restano in `~/.config/nzxt-lift-elite/` (cancellali a mano se vuoi).
-
-### Senza pacchetto, dal checkout
-
-Per provare senza installare (servono le dipendenze della GUI):
-
-```fish
-sudo pacman -S --needed python-gobject gtk4 libadwaita
-sudo install -m 644 70-nzxt-lift-elite.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules; sudo udevadm trigger -s hidraw
+```sh
+git clone <this repository> nzxt-lift-elite
+cd nzxt-lift-elite
 ./liftctl show
 ./lift-elite-control
 ```
 
-Solo le prime tre righe usano `sudo`. `./lift-elite-control --mock` apre l'app su un mouse
-emulato, senza toccare il dispositivo vero.
+`./lift-elite-control --mock` opens the app on an emulated mouse without
+touching any real device.
+
+### Option B: install with pip
+
+PyGObject is best taken from your distribution, so create the virtual
+environment with access to system packages:
+
+```sh
+python3 -m venv --system-site-packages ~/.local/share/nzxt-lift-elite-venv
+~/.local/share/nzxt-lift-elite-venv/bin/pip install '.[gui]'
+```
+
+This installs the `liftctl` and `lift-elite-control` commands into the
+virtual environment's `bin/`. `pip install .` alone installs only the library
+and `liftctl` (no GUI dependencies); `pip install '.[hotplug]'` adds just
+pyudev.
+
+Optional desktop integration (menu entry and icon), as a normal user:
+
+```sh
+install -Dm644 data/io.github.liftelite.Control.desktop -t ~/.local/share/applications/
+install -Dm644 data/icons/hicolor/scalable/apps/io.github.liftelite.Control.svg \
+  -t ~/.local/share/icons/hicolor/scalable/apps/
+```
+
+The `.desktop` file runs `lift-elite-control`, so that command must be on
+your `PATH`.
+
+## Device permissions (udev)
+
+The rule [`70-nzxt-lift-elite.rules`](70-nzxt-lift-elite.rules) gives the
+locally logged-in user access to the mouse and receiver hidraw nodes through
+the `uaccess` tag. No group membership is needed.
+
+```sh
+sudo install -m 644 70-nzxt-lift-elite.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger -s hidraw
+```
+
+Or unplug and replug the cable / receiver after installing the rule. Packages
+should install it to `/usr/lib/udev/rules.d/` instead.
+
+If your system does not use logind's `uaccess` mechanism, adapt the rule to
+your setup (for example `GROUP="plugdev", MODE="0660"`).
+
+## First test
+
+Read-only, writes nothing to the mouse, no `sudo`:
+
+```sh
+liftctl devices         # what is connected (cable / receiver)
+liftctl show            # the 5 onboard profiles
+liftctl firmware-info   # firmware versions
+```
+
+`show` should list the five profiles with polling rate, lift-off, DPI stages
+and buttons. If you get "permission denied", check the udev step. If the
+wireless mouse is asleep, reads time out: move it and try again.
 
 ## Lift Elite Control (GUI)
 
-- **stato del dispositivo** in sola lettura: collegamento (cavo/wireless), nodo hidraw,
-  versioni firmware di mouse, bridge, updater e ricevitore
-- **selettore del profilo** 1..5, con il colore del LED di ciascuno: sceglie il
-  profilo da *modificare*, non lo attiva sul mouse (per attivarlo: pressione
-  lunga sul tasto viola)
-- **prestazioni**: polling (avvisa che 8000 Hz va solo via cavo), lift-off 1/2 mm,
-  motion sync, colore del LED del profilo (si vede per circa due secondi quando
-  cambi profilo tenendo premuto il tasto viola; in uso normale, e in carica, il
-  LED è una spia di stato e può restare verde)
-- **anteprima** con la sagoma del Lift Elite: clicca i tasti, inclusa la vista del
-  fondo per il tasto viola
-- **5 stadi DPI** con slider e campo numerico (50..26000, passi di 50); lo stadio
-  attivo salvato nel profilo è evidenziato
-- **collegamento in tempo reale**: se stacchi o attacchi il cavo o il ricevitore
-  l'app se ne accorge da sola (preferisce il cavo se ci sono entrambi), mostra lo
-  stato nell'intestazione, tiene le modifiche non salvate e non scrive nulla da sola
-- **tasti**: clicca un tasto sul disegno del mouse (o nella lista) e scegli l'azione
-  da un elenco con ricerca: clic, tasti multimediali, lettere, F1–F24, modificatori…
-- **profili con nome**: salva, carica, elimina, importa/esporta JSON
-- **Applica** scrive subito solo ciò che è cambiato e verifica rileggendo (un
-  backup silenzioso viene salvato in `~/.config/nzxt-lift-elite/backups`);
-  **Annulla modifiche** torna ai valori letti
-- tema chiaro/scuro (segue il sistema), notifiche, italiano (`LIFT_ELITE_LANG=en`
-  per l'inglese)
+- **profile selector** 1–5, showing each profile's LED colour. It picks the
+  profile *to edit*; it does not activate it on the mouse (to switch the
+  active profile, long-press the purple button on the bottom)
+- **performance**: polling rate (warns that 8000 Hz works only over the
+  cable), lift-off 1/2 mm, motion sync, profile LED colour
+- **mouse preview**: click the buttons on the drawing, including the bottom
+  view for the purple button
+- **5 DPI stages** with slider and number field (50–26000, steps of 50); the
+  active stage stored in the profile is highlighted
+- **live connection**: plugging or unplugging the cable or receiver is
+  detected automatically (the cable is preferred when both are present);
+  unsaved edits are kept and nothing is written on its own
+- **buttons**: click a button and pick an action from a searchable list
+  (clicks, media keys, letters, F1–F24, modifiers…)
+- **named profiles**: save, load, delete, import/export JSON
+- **Apply** writes only what changed and reads it back to verify (a backup is
+  saved silently first); **Discard** goes back to the values read from the mouse
+- light/dark theme following the system
 
-Opzioni: `--device /dev/hidrawN`, `--transport wired|wireless`, `--theme dark|light`, `--mock`.
-L'hotplug usa `pyudev` (dipendenza del pacchetto); se manca, controlla `/sys/class/hidraw` ogni 1,5 s.
+The interface is in **Italian by default**; set `LIFT_ELITE_LANG=en` for
+English:
 
-## liftctl (riga di comando)
+```sh
+LIFT_ELITE_LANG=en lift-elite-control
+```
 
-I profili si indicano **1..5** (come nella GUI). Nella memoria del mouse e nei file
-JSON il campo `profile` resta lo slot interno **0..4**. Gli stadi DPI sono **1..5**
-(il byte sul filo è 0..4: 0 è il primo valore).
+Options: `--device /dev/hidrawN`, `--transport wired|wireless`,
+`--theme dark|light`, `--mock`, `--mock-wireless`.
 
-```fish
-liftctl show                          # tutti i profili (sola lettura)
-liftctl show --profile 1 --json       # un profilo in JSON (slot interno 0)
-liftctl devices                       # cavo / ricevitore trovati
-liftctl firmware-info                 # versioni firmware (sola lettura)
-liftctl debug-dump                    # sola lettura: hex delle risposte note
-                                      # (esegui, cambia profilo col tasto viola, riesegui)
+## liftctl (command line)
+
+Profiles are numbered **1–5** (as in the GUI); in the mouse memory and in JSON
+files the `profile` field is the internal slot **0–4**. DPI stages are shown
+as **1–5** (the byte on the wire is 0–4). The CLI help text is in Italian.
+
+```sh
+liftctl show                          # all profiles (read-only)
+liftctl show --profile 1 --json       # one profile as JSON (internal slot 0)
+liftctl devices                       # cable / receiver found
+liftctl firmware-info                 # firmware versions (read-only)
+liftctl debug-dump --out before.txt   # read-only hex dump of all known reads
 
 liftctl set --profile 1 --polling 1000 --liftoff 2
 liftctl set --profile 1 --dpi 400,800,1600,3200,6400 --stage 2
 liftctl set --profile 1 --dpi-stage 2=1000 --motion-sync off
 liftctl set --profile 2 --color '#ff0000'
-liftctl restore-led-colors             # colori LED di fabbrica (solo quel campo)
+liftctl restore-led-colors            # factory LED colours (only that field)
 
 liftctl remap --profile 1 --button forward --action volume-up
-liftctl remap --profile 1 --button dpi --action key:0x04    # tasto "a"
-liftctl remap --profile 1 --reset                            # tasti di fabbrica
-liftctl actions volume                                       # cerca un'azione
+liftctl remap --profile 1 --button dpi --action key:0x04    # the "a" key
+liftctl remap --profile 1 --reset                            # factory buttons
+liftctl actions volume                                       # search actions
 
-liftctl save FPS --profile 1          # profilo con nome
-liftctl profiles                      # elenca i profili con nome
-liftctl load FPS --profile 3          # caricalo in un altro slot
+liftctl save FPS --profile 1          # named profile
+liftctl profiles                      # list named profiles
+liftctl load FPS --profile 3          # load it into another slot
 liftctl delete FPS
-liftctl save --all tutti.json         # tutti e 5 in un file
-liftctl --dry-run load --all tutti.json
+liftctl save --all all.json           # all 5 profiles in one file
+liftctl --dry-run load --all all.json
 ```
 
-- **Tasti**: `left`, `middle`, `right`, `forward`, `back`, `dpi`
-- **Azioni**: `left-click`, `middle-click`, `right-click`, `mouse-forward`,
+- **Buttons**: `left`, `middle`, `right`, `forward`, `back`, `dpi`
+- **Actions**: `left-click`, `middle-click`, `right-click`, `mouse-forward`,
   `mouse-back`, `dpi-cycle`, `mute`, `volume-up`, `volume-down`, `play-pause`,
-  `next-track`, `previous-track`, `stop`, lettere e cifre (`a`, `5`), `f1`..`f24`,
-  `enter`, `escape`, `ctrl`, `shift`, `alt`… (`liftctl actions` le elenca tutte)
-- `key:0xNN` assegna un codice HID della tastiera (pagina 0x07). I codici fuori
-  dalla tabella nota richiedono `--allow-unknown-code`.
+  `next-track`, `previous-track`, `stop`, letters and digits (`a`, `5`),
+  `f1`…`f24`, `enter`, `escape`, `ctrl`, `shift`, `alt`… (`liftctl actions`
+  lists them all)
+- `key:0xNN` assigns a HID keyboard usage (page 0x07). Codes outside the known
+  table need `--allow-unknown-code`.
 
-`set`, `remap` e `load` fanno sempre **lettura → modifica dei soli campi richiesti →
-scrittura → rilettura di verifica**. I byte non ancora decodificati restano com'erano.
-`liftctl set --color '#rrggbb'` scrive il colore del LED del profilo (RGB565
-little-endian, come i valori di fabbrica) e lo rilegge. I colori di fabbrica si
-vedono per circa due secondi con una pressione lunga sul tasto viola (confermato);
-una scrittura personalizzata è in prova sul mouse reale.
+`set`, `remap` and `load` always do **read → change only the requested fields
+→ write → read back to verify**. Bytes that are not decoded yet are kept as
+they were.
 
-`liftctl restore-led-colors` (opzionale `--profile N`) scrive solo i byte di
-fabbrica e li rilegge:
+Global options: `--dry-run` (reads, but prints the packets instead of writing
+them), `--debug` (hex dump of every packet), `--device /dev/hidrawN`,
+`--transport auto|wired|wireless` (with both cable and receiver connected,
+`auto` picks the cable).
 
-| profilo | colore | circa | byte RGB565 LE |
+### Profile LED colours
+
+The colour is stored per profile as RGB565 and is shown for about two seconds
+when you long-press the purple button to change profile. During normal use
+(and while charging) the LED is a status light and may stay green. NZXT CAM
+has no colour editor; whether a custom colour shows on the flash is still
+being tested. `liftctl restore-led-colors` (optionally `--profile N`) writes
+back the exact factory bytes:
+
+| profile | colour | approx. | RGB565 LE bytes |
 |---|---|---|---|
 | 1 | Blue | `#0000ff` | `1f00` |
 | 2 | Red | `#ff0000` | `00f8` |
@@ -187,23 +237,15 @@ fabbrica e li rilegge:
 | 4 | Yellow | `#ffaa00` | `40fd` |
 | 5 | Purple | `#ff00ff` | `1ff8` |
 
-Se in precedenza i profili 2 e 5 (slot interni 1 e 4) sono stati cambiati
-(letti `#ffbe6b` e `#ffffff`), questo comando li riporta ai valori di fabbrica.
-
-Opzioni globali: `--dry-run` (legge ma non scrive: stampa i pacchetti),
-`--debug` (dump esadecimale di ogni pacchetto), `--device /dev/hidrawN`,
-`--transport auto|wired|wireless` (con cavo e ricevitore entrambi collegati, `auto`
-sceglie il cavo).
-
-### File di configurazione
+### Configuration files
 
 In `~/.config/nzxt-lift-elite/`:
 
-- `profiles/*.json` — profili con nome (GUI e `liftctl save NOME`)
-- `slots/slot-N.json` — l'ultimo stato scritto in ciascuno slot
-- `backups/` — copia dei 5 profili prima di ogni scrittura (gli ultimi 50)
+- `profiles/*.json`: named profiles (GUI and `liftctl save NAME`)
+- `slots/slot-N.json`: the last state written to each slot
+- `backups/`: a copy of the 5 profiles before every write (last 50 kept)
 
-Esempio di file (formato 2):
+Example file (format 2):
 
 ```json
 {
@@ -225,86 +267,128 @@ Esempio di file (formato 2):
 }
 ```
 
-I campi omessi non vengono toccati quando carichi il file. I profili con nome non
-contengono il colore del LED: caricandoli in un altro slot il colore di quello
-slot resta invariato (i file `--all`, gli export e i backup lo contengono e lo
-applicano). Anche i file del formato 1 (versione precedente) si caricano.
+Omitted fields are left untouched when loading. Named profiles do not carry
+the LED colour, so loading one into another slot keeps that slot's colour
+(`--all` files, exports and backups do include and apply it). Format 1 files
+from older versions still load.
 
-## Plugin CoolerControl
+## CoolerControl plugin
 
-Il mouse compare in CoolerControl come dispositivo **Lift Elite** con cinque canali
-"illuminazione" usati come selettori:
+The mouse appears in [CoolerControl](https://gitlab.com/coolercontrol/coolercontrol)
+as a **Lift Elite** device with five "lighting" channels used as selectors:
 
-| canale | valori |
+| channel | values |
 |---|---|
-| DPI stage | stadio 1..5 (con i DPI attuali nell'etichetta) |
-| Polling rate | 250 … 8000 Hz (8000 solo via cavo) |
+| DPI stage | stage 1–5 (current DPI in the label) |
+| Polling rate | 250 … 8000 Hz (8000 only over the cable) |
 | Lift-off | 1 mm / 2 mm |
 | Motion sync | on / off |
-| Profile LED | un colore |
+| Profile LED | a colour |
 
-Agiscono su **un** profilo, scelto nella pagina del plugin (Impostazioni → Plugin →
-NZXT Lift Elite; predefinito il profilo 1). Quale profilo è attivo sul mouse non è ancora confermato nella GUI (c'è un candidato `0x44`, vedi sotto), quindi nel plugin va scelto a mano. Il plugin scrive solo se il valore cambia, rilegge per
-verificare, e *Reset* ripristina il valore letto all'avvio del plugin. Batteria e altri
-sensori non sono esposti: la risposta che probabilmente contiene la batteria non è
-ancora decodificata con certezza.
+They act on **one** onboard profile, chosen on the plugin page (Settings →
+Plugins → NZXT Lift Elite; profile 1 by default). The plugin writes only when a
+value changes, reads it back, and *Reset* restores the value read when the
+plugin started. Battery and other sensors are not exposed yet.
 
-File: `/var/lib/coolercontrol/plugins/nzxt_lift_elite/` (manifest, pagina, `config.json`)
-e `/usr/lib/nzxt-lift-elite/coolercontrol/` (server Python e stub gRPC). Log:
+Manual install from the checkout (the library must be importable by the
+system Python, e.g. installed system-wide or by a package; `grpcio` and
+`grpcio-tools` are required):
+
+```sh
+sudo ./cc-plugin/install.sh      # removal: sudo ./cc-plugin/uninstall.sh
+```
+
+It installs to `/var/lib/coolercontrol/plugins/nzxt_lift_elite/` (manifest,
+page, `config.json`) and `/usr/lib/nzxt-lift-elite/coolercontrol/` (Python
+server and gRPC stubs) and restarts `coolercontrold`. Logs:
 `journalctl -u coolercontrold -u cc-plugin-nzxt_lift_elite -f`.
 
-GUI, `liftctl` e plugin possono girare insieme: un lock sul nodo hidraw impedisce
-che i pacchetti si mescolino.
+The GUI, `liftctl` and the plugin can run at the same time: an exclusive lock
+on the hidraw node keeps their packets from interleaving.
 
-## Cosa non è ancora noto
+## Arch Linux / CachyOS
 
-- **profilo attivo**: c'è un candidato molto credibile (comando di lettura
-  `0x44`, scrittura `0x45`, stessi nomi CAM `CMD_GET/SET_PROFILE_NUMBER`;
-  confermato nel firmware e in una cattura USB di CAM). La scrittura non è ancora
-  abilitata. Per confermarlo sul mouse: `liftctl debug-dump`, tieni premuto
-  a lungo il tasto viola, `liftctl debug-dump` di nuovo e confronta la riga
-  `44 get-active-profile`. `liftctl show` stampa già l'interpretazione
-  sperimentale di `0x44`.
-- la lettura dei tasti e le versioni del **ricevitore** sono state catturate via cavo;
-  attraverso il ricevitore si assume lo stesso protocollo
-- il campo **colore del LED** (byte 21..22, RGB565 little-endian) coincide coi colori
-  di fabbrica del manuale, che si vedono per circa due secondi con una pressione
-  lunga sul tasto viola (confermato). CAM non ha un editor; una scrittura
-  personalizzata (GUI, `liftctl set --color`, plugin) è in prova sul mouse reale.
-  Per riportare i byte di fabbrica: `liftctl restore-led-colors`
-- **batteria**: non esposta (vedi sopra)
-- se il mouse wireless dorme, le letture vanno in timeout: muovilo e riprova
+A local split [`PKGBUILD`](packaging/arch/PKGBUILD) builds two packages from the
+checkout (nothing is downloaded from the AUR):
 
-## Libreria Python
+- `nzxt-lift-elite`: library, `liftctl`, the app, icons, desktop entry and the
+  udev rule in `/usr/lib/udev/rules.d/`
+- `nzxt-lift-elite-coolercontrol`: the CoolerControl plugin
+
+```sh
+cd nzxt-lift-elite/packaging/arch
+makepkg -si          # as a normal user, without sudo; asks for the password at install time
+```
+
+Dependencies (`python-gobject`, `gtk4`, `libadwaita`, `python-pyudev`,
+`python-grpcio`…) are installed by pacman. To rebuild and reinstall the same
+version after pulling changes, use `makepkg -sif`. If you do not need the
+plugin: `makepkg -s`, then
+`sudo pacman -U nzxt-lift-elite-0.2.0-1-any.pkg.tar.zst`.
+
+Afterwards replug the mouse/receiver (or run the `udevadm` commands above),
+and if you installed the plugin:
+
+```sh
+sudo systemctl restart coolercontrold
+```
+
+Uninstall:
+
+```sh
+sudo pacman -R nzxt-lift-elite-coolercontrol nzxt-lift-elite
+```
+
+Saved profiles stay in `~/.config/nzxt-lift-elite/` (remove it by hand if you
+want). The commands above work in bash, zsh and fish.
+
+## What is not known yet
+
+- **Active profile**: read with command `0x44` (CAM's `CMD_GET_PROFILE_NUMBER`),
+  confirmed in the firmware and in a CAM capture; `liftctl show` prints it as
+  experimental. Setting it (`0x45`) is implemented but **disabled** until it is
+  confirmed on a real mouse. To help: `liftctl debug-dump --out a.txt`,
+  long-press the purple button, `liftctl debug-dump --out b.txt`, compare the
+  `44 get-active-profile` line.
+- button reads and receiver versions were captured over the cable; the same
+  protocol is assumed through the receiver
+- **custom LED colours**: stored and read back, but whether the profile-change
+  flash shows them is still being tested
+- **battery**: not exposed; the status reply that probably contains it is not
+  decoded with certainty
+
+## Python library
 
 ```python
 from nzxt_lift_elite import LiftElite
 
-with LiftElite.open() as mouse:          # transport="wired"/"wireless" per forzare
-    p = mouse.read_profile(0)      # la libreria usa gli slot 0..4
-    nuovo = p.with_changes(polling_hz=1000, dpi_stages={2: 1000}, buttons={"forward": "volume-up"})
-    mouse.apply_profile(nuovo)           # scrive solo le differenze e verifica
+with LiftElite.open() as mouse:          # transport="wired"/"wireless" to force one
+    p = mouse.read_profile(0)            # the library uses slots 0..4
+    new = p.with_changes(polling_hz=1000, dpi_stages={2: 1000}, buttons={"forward": "volume-up"})
+    mouse.apply_profile(new)             # writes only the differences and verifies
 ```
 
-Moduli: `protocol` (pacchetti, nessuna I/O), `actions` (tabella delle azioni),
-`profile` (modello e JSON), `device` (rilevamento e I/O), `store` (profili con nome),
-`mock` (mouse emulato per i test), `cli`, `gui`.
+Modules: `protocol` (packets, no I/O), `actions` (action table), `profile`
+(model and JSON), `device` (discovery and I/O), `hotplug`, `store` (named
+profiles), `mock` (emulated mouse for tests), `cli`, `gui`.
 
-## Test
+## Tests
 
-Senza mouse collegato, dalla radice del progetto:
+No mouse needed, from the project root:
 
-```fish
+```sh
 python3 -m unittest discover -s tests -t .
 ```
 
-Usano un hidraw finto (socket) che emula il mouse. Il test della GUI parte solo con
-un display (`xvfb-run -a python3 -m unittest tests.test_gui_smoke`); quello gRPC del
-plugin solo con `python-grpcio` e `python-grpcio-tools`.
+They use a fake hidraw (socket) that emulates the mouse. The GUI tests need
+PyGObject (with cairo) and run the smoke test only with a display
+(`xvfb-run -a python3 -m unittest tests.test_gui_smoke`); the plugin's gRPC
+test needs `grpcio` and `grpcio-tools`.
 
-## Licenza e avvertenze
+## License and disclaimer
 
-GPL-3.0-or-later (vedi `LICENSE`); i file `.proto` del plugin vengono da CoolerControl
-(GPL-3.0). Lavoro indipendente basato su un protocollo ricostruito e non supportato:
-usalo a tuo rischio. NZXT, CAM e Lift Elite sono marchi dei rispettivi proprietari.
-Il pacchetto non contiene firmware né strumenti per aggiornarlo.
+GPL-3.0-or-later (see [`LICENSE`](LICENSE)); the plugin's `.proto` files come
+from CoolerControl (GPL-3.0). Independent work based on a reconstructed,
+unsupported protocol: use at your own risk. NZXT, CAM and Lift Elite are
+trademarks of their respective owners. This repository contains no firmware
+and no tools to update it.
