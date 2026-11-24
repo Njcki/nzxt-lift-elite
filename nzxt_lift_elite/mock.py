@@ -30,6 +30,7 @@ from .protocol import (
     CMD_GET_ACTIVE_PROFILE,
     CMD_ID_WORD,
     CMD_INFO,
+    CMD_LINK_STATUS,
     CMD_READ_BUTTON,
     CMD_READ_PROFILE,
     CMD_SET_ACTIVE_PROFILE,
@@ -52,6 +53,12 @@ from .protocol import (
     TARGET_DONGLE,
     TARGET_MOUSE,
     VENDOR_ID,
+    LINK_BIT_BRIDGE,
+    LINK_BIT_USB_DATA,
+    LINK_BIT_VBUS,
+    OFF_STAGE,
+    OFF_STAGE_COUNT,
+    REPLY_LINK_STATUS_PREFIX,
     build_status_reply,
     captured_read_reply,
     pad_packet,
@@ -131,6 +138,10 @@ class MouseEmulator:
     buttons: dict[tuple[int, int], int] = field(default_factory=dict)
     active_profile: int = 0
     battery: EmulatedBattery = field(default_factory=EmulatedBattery)
+    # bc status bits: cable power | wired USB data | internal bridge link.
+    # Default = on the cable; open_mock("wireless") clears them. None = the
+    # mouse does not answer bc (e.g. a receiver that does not forward it).
+    link_bits: int | None = LINK_BIT_VBUS | LINK_BIT_USB_DATA | LINK_BIT_BRIDGE
     log: list[bytes] = field(default_factory=list)
     unsafe: list[bytes] = field(default_factory=list)
     _n: int = 0
@@ -187,6 +198,9 @@ class MouseEmulator:
         elif cmd == CMD_UID:
             # Synthetic id (not a real device serial).
             out.append(pad_packet(REPLY_UID_HDR + bytes(range(16))))
+        elif cmd == CMD_LINK_STATUS:
+            if self.link_bits is not None:
+                out.append(pad_packet(REPLY_LINK_STATUS_PREFIX + bytes((self.link_bits & 0xFF,))))
         elif cmd == CMD_ID_WORD:
             out.append(pad_packet(REPLY_ID_WORD_HDR + bytes(range(8, 12))))
         elif cmd == CMD_GET_ACTIVE_PROFILE:
@@ -207,6 +221,10 @@ class MouseEmulator:
                 if not self.ignore_writes:
                     new = bytearray(pkt)
                     new[:6] = REPLY_READ_PROFILE_HDR + bytes((idx,))
+                    # Firmware 0x93: the stage count is copied as-is, the
+                    # active stage is forced to 0 when it is >= the count.
+                    if new[OFF_STAGE] >= new[OFF_STAGE_COUNT]:
+                        new[OFF_STAGE] = 0
                     self.profiles[idx] = new
                 out.append(pad_packet(REPLY_OK))
         elif cmd == CMD_READ_BUTTON:
@@ -293,6 +311,8 @@ def open_mock(transport: str = "wired", emulator: MouseEmulator | None = None, *
     """Return a connected :class:`LiftElite` talking to a fresh emulator."""
     if emulator is None:
         emulator = MouseEmulator(battery=battery_from_env(transport))
+        if transport == "wireless":
+            emulator.link_bits = 0  # on battery, no USB: cable power / data / bridge bits clear
     fake = FakeHidraw(emulator)
     kwargs.setdefault("timeout", 0.5)
     dev = LiftElite(info=fake_info(transport), fd=fake.fd, **kwargs)

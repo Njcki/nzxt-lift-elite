@@ -55,7 +55,7 @@ class CapturedProfilesTest(unittest.TestCase):
             stage_count=5,
             stage=2,
             dpi=(400, 800, 1600, 3200, 6400),
-            stage_mask=0x0F,
+            afk_minutes=15,
             color=bytes.fromhex("1f00"),
             motion_sync=True,
         ),
@@ -65,7 +65,7 @@ class CapturedProfilesTest(unittest.TestCase):
             stage_count=5,
             stage=2,
             dpi=(400, 800, 1600, 3200, 6400),
-            stage_mask=0x0F,
+            afk_minutes=15,
             color=bytes.fromhex("00f8"),
             motion_sync=True,
         ),
@@ -75,7 +75,7 @@ class CapturedProfilesTest(unittest.TestCase):
             stage_count=5,
             stage=2,
             dpi=(800, 1200, 1600, 3200, 6400),
-            stage_mask=0x0F,
+            afk_minutes=15,
             color=bytes.fromhex("e007"),
             motion_sync=True,
         ),
@@ -85,7 +85,7 @@ class CapturedProfilesTest(unittest.TestCase):
             stage_count=5,
             stage=3,
             dpi=(400, 800, 1600, 3200, 6400),
-            stage_mask=0x0F,
+            afk_minutes=15,
             color=bytes.fromhex("40fd"),
             motion_sync=True,
         ),
@@ -95,7 +95,7 @@ class CapturedProfilesTest(unittest.TestCase):
             stage_count=5,
             stage=2,
             dpi=(400, 800, 1600, 3200, 6400),
-            stage_mask=0x0F,
+            afk_minutes=15,
             color=bytes.fromhex("1ff8"),
             motion_sync=True,
         ),
@@ -292,7 +292,7 @@ class ProfileEditTest(unittest.TestCase):
         edited = profile.with_changes(dpi=(400, 800, 1200, 2400, 6400))
         self.assertEqual(edited.dpi, (400, 800, 1200, 2400, 6400))
         self.assertEqual(edited.stage_count, 5)
-        self.assertEqual(edited.stage_mask, 0x0F)  # preserved from the capture
+        self.assertEqual(edited.afk_minutes, 15)  # preserved from the capture (byte 20 = AFK minutes)
 
 
 if __name__ == "__main__":

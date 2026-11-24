@@ -67,6 +67,12 @@ class GuiStagesTest(unittest.TestCase):
                     win.stage_scales[stage - 1].set_value(gui.dpi_to_slider(orig + 350))  # like a drag
 
                 def s_edited():
+                    # The preview shrinks in an idle resize; under load it can
+                    # land after the first 150 ms tick, so give it a few ticks.
+                    if win.diagram.get_height() > 282 and seen.get("resize_wait", 0) < 20:
+                        seen["resize_wait"] = seen.get("resize_wait", 0) + 1
+                        steps.insert(0, s_edited)
+                        return
                     seen["diagram_h"] = win.diagram.get_height()  # after the idle resize
                     seen["edited"] = geom(win)
                     seen["subtitle"] = win.stage_subtitles[stage - 1].get_label()

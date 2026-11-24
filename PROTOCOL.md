@@ -9,12 +9,12 @@ OUT: 4e 02 94 00 93 NN <profile body from byte 6>  -> IN: 4e 02 82 00 01 00... (
 CAM then sends 4e 02 81 00 b0 (status read) -> IN 4e 02 97 00 01 40 01 69 10 00 00 40 01 40 01 00 00 64 00 64 00 18|19 02 08 00 40 01 ...
 
 ## Profile body (byte offsets in the full 64-byte packet)
-6  polling: 0=250 1=500 2=1000 3=2000 4=4000 5=8000 Hz (confirmed)
+6  polling: 0=250 1=500 2=1000 3=2000 4=4000 5=8000 Hz (confirmed; firmware Hz = 250 x 2^code, codes >= 6 break motion: never written). 8000 is accepted over the receiver too, see "Wireless 8000 Hz" below
 7  lift-off distance (seen 1 and 2; confirmed it is lift-off; exact mm mapping unknown, probably 1=1mm 2=2mm)
-8  number of DPI stages (5)
+8  number of DPI stages in the purple-button cycle, 1..5 (factory 5). The firmware copies it as-is (no clamp): a value above 5 would cycle into the bytes after the DPI table, so the library accepts exactly 1..5. Stages beyond the count keep their stored DPI value
 9  current DPI stage, 0-based (0 = first stored DPI value, 4 = fifth). Confirmed 2026-11-17 on the real mouse: cycling the purple button produced 0, 2, 3, 4, then wrapped to 0, and at 0 the pointer was very slow (400 DPI, the first stage). Captured factory bodies with byte 01/02 are therefore user stages 2 and 3, not 1 and 2.
 10..19 DPI stages, 5 x uint16 little-endian (0x0190=400, 0x0320=800, 0x0640=1600, 0x0c80=3200, 0x1900=6400). Changing stage 2 800->1000 changed bytes 12-13 to e8 03 (confirmed)
-20 0x0f (probably enabled-stage mask)
+20 AFK / sleep timeout in MINUTES, 0 = never, factory 0x0f = 15 min (firmware idle task; NOT an "enabled-stage mask" as guessed earlier: every capture showed 0x0f because that is the 15-minute default). See "Sleep timeout" below
 21..22 differs per profile (1f 00, 00 f8, e0 07, 40 fd, 1f f8) — stored profile-indicator field, little-endian RGB565 (deduced from factory values: 0x001f blue, 0xf800 red, 0x07e0 green, 0xfd40 yellow, 0xf81f purple, matching the manual's profile colours). See notes below.
 23 motion sync 1=on 0=off (confirmed)
 Captured profile 0: 4e0294000100050105019001200340068 00c00190f1f0001
@@ -346,13 +346,90 @@ handlers use:
 | +3..+12 | `9001 2003 4006 800c 0019` | DPI 400 / 800 / 1600 / 3200 / 6400 |
 | +0xd | `e803` | polling 1000 Hz (u16 Hz; 0x92 reports code 2) |
 | +0xf | `01` | lift-off 1 mm |
-| +0x10 | `0f` | stage mask |
+| +0x10 | `0f` | AFK / sleep timeout 15 min |
 | +0x11 | from table | LED colour `1f00 00f8 e007 40fd 1ff8` |
 | +0x13 | `01` | motion sync on |
 
 The same template is in the updater and dongle images. This matches the manual
 ("400 / 800 / 1600 (Default) / 3200 / 6400"; the out-of-box active profile 3 sits
 at stage 3 = 1600) and the reviews (1000 Hz default). `liftctl reset-defaults`
-writes these values with the normal verified 0x93 write (stage count and mask
-are never written). It keeps the user's active profile instead of switching to
-profile 3.
+writes these values with the normal verified 0x93 write, including the stage
+count (5) and the sleep timeout (15 min). It keeps the user's active profile
+instead of switching to profile 3.
+
+## Sleep timeout (profile byte 20)
+
+Static analysis of Mouse_App 1.1.5 (nothing sent to a device): a 1-second idle
+task counts seconds without activity and compares the counter with
+`byte20 * 60`. At the limit the mouse enters light sleep (a click wakes it, as
+in the manual: "AFK Timeout Default: 15 minutes", "clicks wake the mouse").
+0 = never. It only counts on battery (no VBUS) with the radio connected, and
+resets on any activity. It is per profile (part of the 0x93/0x92 body); CAM
+calls it `afk_timeout_minutes`. Earlier versions of this file called the byte a
+"stage mask"; the library always echoed the read value, so nothing was changed.
+
+Tools: `liftctl set --profile N --afk MIN` (0..255), shown by `liftctl show`;
+GUI: Performance → "Sleep after" (Never, 1, 2, 5, 10, 15, 30, 60 min, plus a
+custom value already on the mouse); JSON `afk_minutes`. Factory reset writes 15.
+Real-mouse test pending (set 1 min, wait ~60 s on the receiver, restore 15).
+
+## Number of DPI stages (profile byte 8)
+
+`liftctl set --profile N --stages 1..5`; GUI: the small "Stages" dropdown in the
+DPI stages header (stages beyond it are dimmed and keep their value); JSON
+`dpi_stage_count` (`dpi_stages` always lists all five values). The firmware's
+0x93 handler forces the active stage (byte 9) to 0 when it is >= the count; the
+library never relies on that: an active stage left outside a smaller count is
+clamped to the last enabled stage before writing, and an explicit `--stage`
+outside the count is refused. Factory reset writes 5. Real-mouse test pending
+(set 3, check that the purple button wraps after stage 3, restore 5).
+
+## Wireless 8000 Hz = high-performance sensor mode
+
+The firmware picks the PAW3395 mode on every profile write/switch:
+cable + 8000 Hz → corded gaming mode; cable at other rates or **battery + 8000 Hz →
+high-performance mode**; **battery at 250..4000 Hz → low-power mode**. The radio
+is capped at 4000 Hz in two places unless the wired-USB flag is set, so over the
+receiver "8000 Hz" still reports at 4000 Hz but keeps the sensor in
+high-performance mode (more battery use). The library has always accepted 8000
+on both links; the GUI and `liftctl` now explain it in the polling note instead
+of calling it "cable only". No new command.
+
+## Link status `bc` (read-only)
+
+`4e 02 81 00 bc` → `4e 02 81 00 XX`. Verified in the command dispatcher (entry
+for 0xbc): the handler only reads a GPIO pin (cable power) and two firmware
+flags into the one-byte reply (the reply buffer is zeroed before every command)
+and sends it; like `b0`/`b7` it skips the "command received" flag the other
+commands set. No state, flash or radio change.
+
+| bit | meaning |
+|---|---|
+| 0 | VBUS: USB cable power present (the pin the charger uses) |
+| 1 | wired USB data path active (the flag that allows real 8 kHz) |
+| 2 | internal link up: nRF52840 ↔ LPC5516 "HyperSonic" bridge (SPI) |
+
+Bits 3..7 are masked off. Through the receiver the request is forwarded like
+every TT=02 command. `liftctl show` prints a "Link status" line,
+`liftctl debug-dump` includes the `bc` read with a decoded comment, and the GUI
+shows it in the Connection row tooltip (plus "cable power" in the row text when
+the cable only charges while the receiver is in use). The full state read tries
+`bc` once with a short timeout, so a link that does not answer costs < 0.5 s.
+Real-mouse test pending (cable in / out / receiver only).
+
+## Commands the library refuses (never sent)
+
+`DANGEROUS_COMMANDS` (refused by `assert_safe_packet` before any write, even
+with an allowlist): a1–a5, f1, f4, f5, f6 (firmware update / boot) and, from the
+same dispatcher analysis:
+
+| cmd | why |
+|---|---|
+| 94 | resets all 5 profiles and the power word to defaults (our reset uses verified 0x93/0x50 writes + 0x45 instead) |
+| b1 | stores the power word; its low half is the low-battery cut-off in mAh (0 would allow deep discharge of the cell) |
+| b9 | erases and rewrites the internal config page (pairing id, boot bank pointer): can break pairing or boot |
+| ba | clears a flag in the boot/updater mailbox area |
+| c0 | factory/test multiplexer: can write flash, inhibit charging, or power the system off |
+
+Everything else not in `SAFE_COMMANDS` is refused as unknown. The 0x45
+allowlist is unchanged (exactly `4e 02 82 00 45 PP`, PP 0..4).

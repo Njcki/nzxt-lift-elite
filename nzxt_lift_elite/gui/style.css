@@ -142,3 +142,15 @@
 }
 .battery-percent.battery-warn { color: @warning_color; }
 .battery-percent.battery-low { color: @error_color; }
+
+/* DPI stages beyond the "Stages" count: not in the purple-button cycle, value kept */
+.stage-row.stage-off .stage-labels,
+.stage-row.stage-off scale,
+.stage-row.stage-off spinbutton,
+.stage-row.stage-off checkbutton {
+  opacity: 0.45;
+}
+.stage-count dropdown > button {
+  min-height: 24px;
+  padding: 0 6px;
+}

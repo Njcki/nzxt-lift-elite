@@ -61,9 +61,15 @@ from .model import (  # noqa: E402
     POLL_FAILURES_BEFORE_BACKOFF,
     POLL_INTERVAL_WIRED_MS,
     POLL_INTERVAL_WIRELESS_MS,
+    AFK_CHOICES,
     CATEGORY_LABELS,
     LIFTOFF_CHOICES,
     POLLING_CHOICES,
+    STAGE_COUNT_CHOICES,
+    afk_choice_label,
+    afk_choices,
+    connection_subtitle,
+    link_tooltip,
     SLIDER_MAX,
     EditorModel,
     Session,
@@ -791,6 +797,13 @@ class MainWindow(Adw.ApplicationWindow):
                                         subtitle=_("Syncs sensor frames with USB reports (slightly smoother, tiny extra latency)"))
         self.motion_row.connect("notify::active", self._on_motion)
         group.add(self.motion_row)
+        # Sleep (AFK) timeout, profile byte 20. One compact row; the list
+        # grows by one entry only when the mouse has a custom value.
+        self.afk_row = Adw.ComboRow(title=_("Sleep after"), subtitle=_("Only on battery"))
+        self._afk_values: tuple[int, ...] = ()
+        self._set_afk_model(AFK_CHOICES)
+        self.afk_row.connect("notify::selected", self._on_afk)
+        group.add(self.afk_row)
         self.color_row = Adw.ActionRow(
             title=_("Profile LED colour"),
             subtitle=_("shown for ~2 s when you change profile by holding the purple button"),
@@ -802,11 +815,31 @@ class MainWindow(Adw.ApplicationWindow):
         group.add(self.color_row)
         return group
 
+    def _set_afk_model(self, values: tuple[int, ...]) -> None:
+        if values != self._afk_values:
+            self._afk_values = values
+            self.afk_row.set_model(Gtk.StringList.new([afk_choice_label(v) for v in values]))
+
     def _build_dpi_group(self) -> Gtk.Widget:
         group = Adw.PreferencesGroup(
             title=_("DPI stages"),
-            description=_("The purple button under the mouse cycles through these five values. The selected stage is the one stored as active."),
+            description=_("The purple button cycles through the enabled stages; the selected one is stored as active."),
         )
+        # Number of stages in the cycle: a small flat dropdown in the group
+        # header (no extra row). Stages beyond it are dimmed but keep their value.
+        count_box = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
+        count_box.add_css_class("stage-count")
+        count_label = Gtk.Label(label=_("Stages"), valign=Gtk.Align.CENTER)
+        count_label.add_css_class("dim-label")
+        count_label.add_css_class("caption")
+        self.stage_count_dd = Gtk.DropDown.new_from_strings([str(n) for n in STAGE_COUNT_CHOICES])
+        self.stage_count_dd.add_css_class("flat")
+        self.stage_count_dd.set_valign(Gtk.Align.CENTER)
+        self.stage_count_dd.set_tooltip_text(_("How many stages the purple button cycles through"))
+        self.stage_count_dd.connect("notify::selected", self._on_stage_count)
+        count_box.append(count_label)
+        count_box.append(self.stage_count_dd)
+        group.set_header_suffix(count_box)
         self.stage_rows: list[Adw.PreferencesRow] = []
         self.stage_checks: list[Gtk.CheckButton] = []
         self.stage_scales: list[Gtk.Scale] = []
@@ -969,7 +1002,9 @@ class MainWindow(Adw.ApplicationWindow):
             if not self.device_present and not self.session.is_mock:
                 self.row_conn.set_subtitle(_("Disconnected"))
             else:
-                self.row_conn.set_subtitle(transport_label(transport) + (f" · {state.info.path}" if state else ""))
+                self.row_conn.set_subtitle(connection_subtitle(transport_label(transport), m.link,
+                                                               state.info.path if state else None))
+            self.row_conn.set_tooltip_text(link_tooltip(m.link) if self.device_present or self.session.is_mock else None)
             self._sync_battery()
             fw = state.firmware if state else None
             self.row_fw.set_subtitle(f"{fw.name} {fw.fmt(fw.app_version)} ({fw.mode_name})" if fw else "—")
@@ -991,11 +1026,17 @@ class MainWindow(Adw.ApplicationWindow):
             self.polling_row.set_subtitle(note or "")
             self.liftoff_row.set_selected(LIFTOFF_CHOICES.index(p.liftoff) if p.liftoff in LIFTOFF_CHOICES else 0)
             self.motion_row.set_active(p.motion_sync)
+            self._set_afk_model(afk_choices(p.afk_minutes, orig.afk_minutes))
+            self.afk_row.set_selected(self._afk_values.index(p.afk_minutes))
             self.color_btn.set_rgba(rgba(rgb565_to_rgb(p.color)))
             # dpi
+            self.stage_count_dd.set_selected(STAGE_COUNT_CHOICES.index(p.stage_count))
             for i in range(5):
-                visible = i < p.stage_count
-                self.stage_rows[i].set_visible(visible)
+                enabled = i < p.stage_count
+                row = self.stage_rows[i]
+                (row.remove_css_class if enabled else row.add_css_class)("stage-off")
+                self.stage_checks[i].set_sensitive(enabled)
+                row.set_tooltip_text(None if enabled else _("Not in the purple-button cycle (value kept)"))
                 value = p.dpi[i]
                 self.stage_spins[i].set_value(value)
                 self.stage_scales[i].set_value(dpi_to_slider(value))
@@ -1043,6 +1084,16 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_motion(self, row, _pspec) -> None:
         self._edit(lambda: self.model.set_motion_sync(row.get_active()))
+
+    def _on_afk(self, row, _pspec) -> None:
+        index = row.get_selected()
+        if 0 <= index < len(self._afk_values):
+            self._edit(lambda: self.model.set_afk(self._afk_values[index]))
+
+    def _on_stage_count(self, dd, _pspec) -> None:
+        index = dd.get_selected()
+        if 0 <= index < len(STAGE_COUNT_CHOICES):
+            self._edit(lambda: self.model.set_stage_count(STAGE_COUNT_CHOICES[index]))
 
     def _on_color(self, btn, _pspec) -> None:
         c = btn.get_rgba()
@@ -1149,6 +1200,8 @@ class MainWindow(Adw.ApplicationWindow):
         """Subtitle of DPI stage row ``i`` (0-based): active marker + value change."""
         p, orig = self.model.current(), self.model.original()
         parts: list[str] = []
+        if i >= p.stage_count:
+            parts.append(_("off"))
         if i + 1 == p.stage:
             parts.append(_("active"))
         elif orig.stage != p.stage and i + 1 == orig.stage:

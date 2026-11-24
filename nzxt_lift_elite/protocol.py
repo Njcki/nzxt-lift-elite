@@ -54,6 +54,19 @@ DPI_VALUE_MIN = 50
 DPI_VALUE_MAX = 26_000
 DPI_STEP = 50
 LIFTOFF_VALUES = (1, 2)  # 1 mm / 2 mm (CAM shows exactly these two)
+# Number of DPI stages the purple button cycles through (byte 8). The firmware
+# copies it as-is (no clamp): a count above 5 would make the button cycle
+# into the bytes after the DPI table, so only 1..5 is ever accepted.
+STAGE_COUNT_MIN = 1
+STAGE_COUNT_MAX = DPI_STAGE_COUNT
+STAGE_COUNT_FACTORY = 5
+# AFK / sleep timeout in MINUTES (byte 20): the firmware's 1 s idle task
+# compares its idle counter with byte20 * 60 and puts the mouse into light
+# sleep (clicks wake it). Counts only on battery with the radio connected;
+# 0 = never sleep. Factory 15 (manual: "AFK Timeout Default: 15 minutes").
+AFK_MINUTES_MIN = 0
+AFK_MINUTES_MAX = 255
+AFK_MINUTES_FACTORY = 15
 
 # Offsets in the full 64-byte profile packet (read reply or write command).
 OFF_POLLING = 6
@@ -61,7 +74,11 @@ OFF_LIFTOFF = 7
 OFF_STAGE_COUNT = 8
 OFF_STAGE = 9  # active DPI stage, 0-based (0 = first value, 4 = fifth); confirmed on device
 OFF_DPI = 10  # 5 x uint16 little-endian
-OFF_MASK = 20
+OFF_AFK = 20  # sleep (AFK) timeout in minutes, 0 = never; see AFK_MINUTES_*
+# Legacy name: byte 20 was once guessed to be an "enabled-stage mask" because
+# every capture showed 0x0f (= 15 minutes). The firmware reads it as the AFK
+# timeout; the library always preserved it, so nothing was ever changed.
+OFF_MASK = OFF_AFK
 OFF_COLOR = 21  # 2 bytes, RGB565 little-endian: stored profile-indicator field
 OFF_MOTION = 23
 BODY_START = 6
@@ -101,6 +118,7 @@ CMD_READ_PROFILE = 0x92  # 4e 02 82 00 92 PP -> 4e 02 94 00 01 PP <body>
 CMD_WRITE_PROFILE = 0x93  # 4e 02 94 00 93 PP <body> -> 4e 02 82 00 01
 CMD_READ_BUTTON = 0x51  # 4e 02 84 00 51 PP BB (00) -> 4e 02 85 00 01 PP BB 04 AA
 CMD_WRITE_BUTTON = 0x50  # 4e 02 85 00 50 PP BB 04 AA -> 4e 02 82 00 01
+CMD_LINK_STATUS = 0xBC  # 4e 02 81 00 bc -> 4e 02 81 00 XX (3 status bits, read-only)
 
 # 0x44 / 0x45 are the firmware get/set pair for the onboard active profile
 # (CAM names: CMD_GET_PROFILE_NUMBER / CMD_SET_PROFILE_NUMBER). Firmware
@@ -128,6 +146,9 @@ REPLY_GET_ACTIVE_PROFILE_HDR = bytes((0x4E, TARGET_MOUSE, 0x82, 0x00, 0x01))
 REPLY_SET_ACTIVE_PROFILE_HDR = bytes((0x4E, TARGET_MOUSE, 0x81, 0x00, 0x01))
 REPLY_READ_PROFILE_HDR = bytes((0x4E, TARGET_MOUSE, 0x94, 0x00, 0x01))
 REPLY_READ_BUTTON_HDR = bytes((0x4E, TARGET_MOUSE, 0x85, 0x00, 0x01))
+# bc reply: one byte of status bits (same 4-byte prefix as the 0x45 reply,
+# which is never in flight at the same time: every exchange holds the lock).
+REPLY_LINK_STATUS_PREFIX = bytes((0x4E, TARGET_MOUSE, 0x81, 0x00))
 
 # Legacy names kept for callers of 0.1
 CMD_WRITE_PROFILE_HDR = bytes((0x4E, TARGET_MOUSE, 0x94, 0x00, CMD_WRITE_PROFILE))
@@ -147,8 +168,23 @@ DANGEROUS_CMD_RESET = 0xF1  # soft reset
 DANGEROUS_CMD_UNKNOWN_F4 = 0xF4  # unknown, starts a timer
 DANGEROUS_CMD_BOOT_MAILBOX = 0xF5  # "next boot: updater/app"
 DANGEROUS_CMD_UNKNOWN_F6 = 0xF6  # unknown flag
+# Found in the Mouse_App 1.1.5 command dispatcher while looking for hidden
+# settings; none of them is ever needed by this tool:
+DANGEROUS_CMD_FACTORY_RESET = 0x94  # resets ALL profiles + the power word to defaults (CAM "reset")
+DANGEROUS_CMD_POWER_WORD = 0xB1  # stores the power word: low half = low-battery cut-off (mAh);
+#                                  0 would let the Li-ion cell deep-discharge
+DANGEROUS_CMD_CONFIG_PAGE = 0xB9  # erases and rewrites the internal config page (pairing id,
+#                                   boot bank pointer): can break pairing or boot
+DANGEROUS_CMD_CLEAR_FLAG = 0xBA  # clears a flag in the boot/updater mailbox area
+DANGEROUS_CMD_FACTORY_TEST = 0xC0  # factory/test multiplexer: can write flash, inhibit charging,
+#                                    or power the system off
 DANGEROUS_COMMANDS = frozenset(
     {
+        DANGEROUS_CMD_FACTORY_RESET,
+        DANGEROUS_CMD_POWER_WORD,
+        DANGEROUS_CMD_CONFIG_PAGE,
+        DANGEROUS_CMD_CLEAR_FLAG,
+        DANGEROUS_CMD_FACTORY_TEST,
         DANGEROUS_CMD_FLASH_WRITE,
         DANGEROUS_CMD_FLASH_VERIFY,
         DANGEROUS_CMD_FLASH_END,
@@ -173,13 +209,28 @@ SAFE_COMMANDS = frozenset(
         CMD_WRITE_PROFILE,
         CMD_READ_BUTTON,
         CMD_WRITE_BUTTON,
+        # bc: verified in the firmware command dispatcher (entry for 0xbc):
+        # it only reads P0.31 (VBUS) and two RAM flags into the 1-byte reply
+        # buffer, which the dispatcher zeroes before every command, and sends
+        # it. No state, flash or radio change; the dispatcher treats it like
+        # b0/b7 (it skips the "command received" flag the other commands set).
+        CMD_LINK_STATUS,
     }
 )
 #: Read-only subset (used by --dry-run, debug-dump, and tests that assert no writes).
 #: CMD_SET_ACTIVE_PROFILE (0x45) is deliberately absent, even though the
 #: packet format is known, until ENABLE_ACTIVE_PROFILE_APPLY is turned on.
 READ_ONLY_COMMANDS = frozenset(
-    {CMD_INFO, CMD_UID, CMD_STATUS, CMD_ID_WORD, CMD_GET_ACTIVE_PROFILE, CMD_READ_PROFILE, CMD_READ_BUTTON}
+    {
+        CMD_INFO,
+        CMD_UID,
+        CMD_STATUS,
+        CMD_ID_WORD,
+        CMD_GET_ACTIVE_PROFILE,
+        CMD_READ_PROFILE,
+        CMD_READ_BUTTON,
+        CMD_LINK_STATUS,
+    }
 )
 
 
@@ -223,8 +274,8 @@ def assert_safe_packet(packet: bytes, *, allow: frozenset[int] = frozenset()) ->
     cmd = packet[4]
     if cmd in DANGEROUS_COMMANDS:
         raise DangerousCommandError(
-            f"refusing to send firmware/boot command 0x{cmd:02x}: the update "
-            "procedure is unverified and could brick the mouse"
+            f"refusing to send dangerous command 0x{cmd:02x} (firmware update, boot, "
+            "factory/test, config page or power settings): it could brick the mouse"
         )
     if cmd in allow:
         if cmd == CMD_SET_ACTIVE_PROFILE:
@@ -323,6 +374,20 @@ def validate_liftoff(value: int) -> int:
     return value
 
 
+def validate_stage_count(count: int) -> int:
+    """Number of DPI stages in the purple-button cycle: strictly 1..5."""
+    if isinstance(count, bool) or not isinstance(count, int) or not (STAGE_COUNT_MIN <= count <= STAGE_COUNT_MAX):
+        raise ValidationError(f"number of DPI stages must be {STAGE_COUNT_MIN}..{STAGE_COUNT_MAX}, got {count!r}")
+    return count
+
+
+def validate_afk_minutes(minutes: int) -> int:
+    """Sleep timeout in minutes: 0 (never) .. 255."""
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or not (AFK_MINUTES_MIN <= minutes <= AFK_MINUTES_MAX):
+        raise ValidationError(f"sleep timeout must be {AFK_MINUTES_MIN}..{AFK_MINUTES_MAX} minutes, got {minutes!r}")
+    return minutes
+
+
 def validate_stage(stage: int, stage_count: int = DPI_STAGE_COUNT) -> int:
     """User-facing DPI stage number (1..stage_count)."""
     if isinstance(stage, bool) or not isinstance(stage, int) or not (DPI_STAGE_MIN <= stage <= stage_count):
@@ -365,13 +430,25 @@ def validate_dpi_list(values, count: int = DPI_STAGE_COUNT) -> list[int]:
 
 
 def polling_warning(hz: int, transport: str | None = None) -> str | None:
-    """Short (translated) warning for rates that depend on the connection."""
+    """Short (translated) note for rates that behave differently over the receiver.
+
+    Firmware (it picks the PAW3395 mode and caps the radio): over the
+    receiver the radio never goes above 4000 Hz, but
+    selecting 8000 Hz keeps the sensor in High Performance mode instead of
+    its Low Power mode (used on battery at 250..4000 Hz). Cable: 8000 Hz is
+    real 8 kHz. So 8000 Hz is allowed on both links.
+    """
     if hz == WIRED_ONLY_HZ:
+        if transport == "wired":
+            return None
         if transport == "wireless":
-            return _("8000 Hz works only wired: in wireless the mouse uses 4000 Hz at most.")
-        return _("8000 Hz works only with the mouse connected by cable; in wireless the maximum is 4000 Hz.")
-    if hz == WIRELESS_MAX_HZ and transport != "wired":
-        return _("4000 Hz is the maximum with the receiver; 8000 Hz is available only wired.")
+            return _("Radio at 4000 Hz; 8000 keeps the sensor in high-performance mode (more battery).")
+        return _("8000 Hz is real only by cable; over the receiver the radio runs at 4000 Hz "
+                 "and the sensor stays in high-performance mode.")
+    if transport == "wireless" and hz <= WIRELESS_MAX_HZ:
+        return _("On battery 250–4000 Hz use the sensor's power-saving mode; 8000 keeps high performance.")
+    if transport is None and hz == WIRELESS_MAX_HZ:
+        return _("On battery 250–4000 Hz use the sensor's power-saving mode; 8000 keeps high performance.")
     return None
 
 
@@ -575,8 +652,8 @@ class ProfileBody:
     liftoff: int
     stage_count: int
     stage: int
-    dpi: tuple[int, ...]
-    stage_mask: int
+    dpi: tuple[int, ...]  # all five stored values (stages beyond stage_count are kept, not cycled)
+    afk_minutes: int  # sleep timeout, 0 = never (byte 20; was misread as a "stage mask")
     color: bytes
     motion_sync: bool
     raw: bytes
@@ -609,7 +686,7 @@ def parse_profile_reply(packet: bytes, expected_index: int | None = None) -> Pro
         stage_count=stage_count,
         stage=stage,
         dpi=dpi,
-        stage_mask=data[OFF_MASK],
+        afk_minutes=data[OFF_AFK],
         color=bytes(data[OFF_COLOR : OFF_COLOR + 2]),
         motion_sync=data[OFF_MOTION] != 0,
         raw=data,
@@ -634,16 +711,30 @@ def apply_body_fields(
     dpi_stages: dict[int, int] | None = None,
     motion_sync: bool | None = None,
     color: bytes | None = None,
+    stage_count: int | None = None,
+    afk_minutes: int | None = None,
 ) -> bytes:
     """Return a new 64-byte packet with only the requested fields changed.
 
-    The stage count (byte 8) and the stage mask (byte 20) are never changed:
-    their exact meaning is not confirmed (captures always show 5 / 0x0f), so
-    ``dpi`` must carry exactly ``stage_count`` values. Unknown bytes are
-    preserved from ``raw``.
+    ``dpi`` always carries all five stored values and ``dpi_stages`` may edit
+    any of the five (stages beyond ``stage_count`` keep their value, they are
+    just not in the purple-button cycle). ``stage_count`` is strictly 1..5.
+    The active stage is validated against the (new) count; an active stage
+    that a smaller count leaves outside the cycle is clamped to the last
+    enabled stage (the firmware would silently reset it to stage 1).
+    Unknown bytes are preserved from ``raw``.
     """
     data = bytearray(pad_packet(raw))
-    count = data[OFF_STAGE_COUNT] or DPI_STAGE_COUNT
+    count = data[OFF_STAGE_COUNT]
+    if not STAGE_COUNT_MIN <= count <= STAGE_COUNT_MAX:
+        count = DPI_STAGE_COUNT
+    if stage_count is not None:
+        count = validate_stage_count(stage_count)
+        data[OFF_STAGE_COUNT] = count
+        if data[OFF_STAGE] >= count:
+            data[OFF_STAGE] = count - 1  # clamp: keep the active stage inside the cycle
+    if afk_minutes is not None:
+        data[OFF_AFK] = validate_afk_minutes(afk_minutes)
     if index is not None:
         data[5] = validate_profile_index(index)
     if polling_hz is not None:
@@ -651,11 +742,11 @@ def apply_body_fields(
     if liftoff is not None:
         data[OFF_LIFTOFF] = validate_liftoff(liftoff)
     if dpi is not None:
-        for i, value in enumerate(validate_dpi_list(dpi, count)):
+        for i, value in enumerate(validate_dpi_list(dpi, DPI_STAGE_COUNT)):
             _put_u16le(data, OFF_DPI + 2 * i, value)
     if dpi_stages:
         for stage_no, value in dpi_stages.items():
-            validate_stage(stage_no, count)
+            validate_stage(stage_no, DPI_STAGE_COUNT)
             _put_u16le(data, OFF_DPI + 2 * (stage_no - 1), validate_dpi_value(value))
     if stage is not None:
         data[OFF_STAGE] = encode_wire_stage(stage, count)
@@ -731,6 +822,72 @@ def parse_info_reply(packet: bytes, target: int = TARGET_MOUSE) -> FirmwareInfo:
         updater_version=_version(p, 26),
         raw=data,
     )
+
+
+# --- link status (0xbc) --------------------------------------------------------
+# Read-only. Firmware (dispatcher entry for bc, Mouse_App 1.1.5) builds one
+# byte and replies `4e 02 81 00 XX`:
+#   bit 0  VBUS: USB cable power present (GPIO P0.31, the pin the charger uses)
+#   bit 1  wired USB data path active (the firmware flag that allows 8 kHz)
+#   bit 2  internal link up: nRF52840 <-> LPC5516 "HyperSonic" bridge over SPI
+# Bits 3..7 are not set by the handler (the reply buffer is zeroed first); they
+# are masked off. Through the receiver the request is forwarded to the mouse
+# like every TT=02 command (not captured from CAM).
+LINK_BIT_VBUS = 0x01
+LINK_BIT_USB_DATA = 0x02
+LINK_BIT_BRIDGE = 0x04
+LINK_BITS_MASK = 0x07
+
+
+@dataclass(frozen=True)
+class LinkStatus:
+    """Decoded ``bc`` reply."""
+
+    raw: int  # the reply byte as received (before masking)
+
+    @property
+    def bits(self) -> int:
+        return self.raw & LINK_BITS_MASK
+
+    @property
+    def cable_power(self) -> bool:
+        return bool(self.raw & LINK_BIT_VBUS)
+
+    @property
+    def usb_data(self) -> bool:
+        return bool(self.raw & LINK_BIT_USB_DATA)
+
+    @property
+    def bridge_link(self) -> bool:
+        return bool(self.raw & LINK_BIT_BRIDGE)
+
+    def to_dict(self) -> dict:
+        return {
+            "bits": self.bits,
+            "cable_power": self.cable_power,
+            "usb_data": self.usb_data,
+            "internal_link": self.bridge_link,
+        }
+
+
+def link_status_packet() -> bytes:
+    """Read-only ``bc``: cable power / wired data / internal link bits."""
+    return pad_packet(header(CMD_LINK_STATUS))
+
+
+def parse_link_status_reply(packet: bytes) -> LinkStatus:
+    data = pad_packet(bytes(packet[:PACKET_SIZE]))
+    if data[:4] != REPLY_LINK_STATUS_PREFIX:
+        raise ProtocolError(f"not a bc reply: {data[:6].hex(' ')}")
+    return LinkStatus(raw=data[4])
+
+
+def build_link_status_reply(*, cable_power: bool, usb_data: bool, bridge_link: bool) -> bytes:
+    """A bc reply as the firmware builds it (mock / tests)."""
+    value = (LINK_BIT_VBUS if cable_power else 0) | (LINK_BIT_USB_DATA if usb_data else 0) | (
+        LINK_BIT_BRIDGE if bridge_link else 0
+    )
+    return pad_packet(REPLY_LINK_STATUS_PREFIX + bytes((value,)))
 
 
 # --- battery / status (0xb0) -------------------------------------------------

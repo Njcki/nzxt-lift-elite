@@ -6,7 +6,8 @@ device with "lighting" channels that work as selectors for one onboard
 profile slot (``profile_slot`` in config.json, set from the plugin page):
 
 * ``dpi_stage``    active DPI stage (stage-1 .. stage-5)
-* ``polling``      polling rate (250 .. 8000 Hz; 8000 only through the cable)
+* ``polling``      polling rate (250 .. 8000 Hz; over the receiver the radio stays
+  at 4000 Hz, 8000 only keeps the sensor in high-performance mode)
 * ``liftoff``      lift-off distance (1 / 2 mm)
 * ``motion_sync``  on / off
 * ``profile_led``  colour of the profile LED (one colour, stored as RGB565;
@@ -15,8 +16,8 @@ profile slot (``profile_slot`` in config.json, set from the plugin page):
 Every request reads the slot first and writes only when something changes,
 then reads it back (same library as ``liftctl`` and the GUI; a file lock keeps
 them from interleaving). ResetChannel restores what the slot held when the
-plugin started. Battery level is not exposed: the reply that probably carries
-it has not been decoded with certainty.
+plugin started. Battery level, sleep timeout and the number of DPI stages are
+not exposed here (use liftctl or the GUI).
 
 No firmware command is reachable from here: the library refuses them.
 """
@@ -197,7 +198,7 @@ class PluginCore:
         slot = self.slot() + 1
         polling = []
         for hz in POLLING_HZ.values():
-            note = " (" + _("cable only") + ")" if hz == 8000 else ""
+            note = " (" + _("radio 4000 Hz over the receiver") + ")" if hz == 8000 else ""
             polling.append(Mode(f"{hz}hz", f"{hz} Hz{note}"))
         return [
             Channel("dpi_stage", _("DPI stage (profile {n})", n=slot), tuple(stage_modes)),

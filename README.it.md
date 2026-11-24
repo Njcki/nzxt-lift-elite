@@ -135,8 +135,10 @@ wireless dorme le letture vanno in timeout: muovilo e riprova.
 - **stadio DPI in tempo reale**: con la finestra in primo piano l'app interroga
   (in sola lettura) il profilo attivo e lo stadio corrente. Una pressione
   breve del tasto viola si vede nell'interfaccia.
-- **prestazioni**: polling (avvisa che 8000 Hz va solo via cavo), lift-off
-  1/2 mm, motion sync, colore del LED del profilo
+- **prestazioni**: polling, lift-off 1/2 mm, motion sync, colore del LED
+  del profilo e **Sospensione dopo** (Mai, 1, 2, 5, 10, 15, 30, 60 min, o
+  un valore personalizzato già presente sul mouse; di fabbrica 15 min,
+  conta solo a batteria)
 - **anteprima del mouse**: un disegno stilizzato e cliccabile, inclusa la
   vista del fondo per il tasto viola. L'altezza dell'anteprima è
   ridimensionabile entro certi limiti (predefinito 280 px, circa 180–420 px;
@@ -144,7 +146,12 @@ wireless dorme le letture vanno in timeout: muovilo e riprova.
   o una sotto l'altra, a seconda della larghezza. Si usa librsvg se c'è,
   altrimenti un disegno vettoriale incorporato.
 - **5 stadi DPI** con slider e campo numerico (50–26000, passi di 50); lo
-  stadio attivo salvato nel profilo è evidenziato
+  stadio attivo salvato nel profilo è evidenziato. Il menu **Stadi** (1–5)
+  nell'intestazione sceglie quanti stadi scorre il tasto viola: quelli
+  esclusi restano visibili ma attenuati e tengono il loro valore
+- **8000 Hz con il ricevitore**: la radio resta a 4000 Hz, ma il sensore
+  rimane in modalità alte prestazioni (più consumo). A batteria, 250–4000 Hz
+  usano la modalità risparmio del sensore. La nota sotto il polling lo spiega
 - **batteria**: percentuale dal fuel gauge del mouse, più tensione, stato
   di carica, temperatura e numero di cicli. Un indicatore sta sulla scheda
   dell'anteprima (i dettagli nel suggerimento e nella sezione Dispositivo).
@@ -156,7 +163,10 @@ wireless dorme le letture vanno in timeout: muovilo e riprova.
   l'indicatore si attenua. Funziona su cavo e ricevitore.
 - **collegamento in tempo reale**: se attacchi o stacchi il cavo o il
   ricevitore l'app se ne accorge da sola (preferisce il cavo se ci sono
-  entrambi); le modifiche non salvate restano e non scrive nulla da sola
+  entrambi); le modifiche non salvate restano e non scrive nulla da sola.
+  Il suggerimento della riga Collegamento mostra lo stato del collegamento
+  in sola lettura (alimentazione dal cavo, dati USB, bridge interno); se
+  il cavo sta solo caricando mentre usi il ricevitore, la riga lo indica
 - **tasti**: clicca un tasto e scegli l'azione da un elenco con ricerca
   (clic, tasti multimediali, lettere, F1–F24, modificatori…). Le righe dei
   tasti di un profilo che non è attivo sul mouse sono bloccate: una
@@ -209,6 +219,8 @@ liftctl debug-dump --out prima.txt    # sola lettura: hex di tutte le letture no
 liftctl set --profile 1 --polling 1000 --liftoff 2
 liftctl set --profile 1 --dpi 400,800,1600,3200,6400 --stage 2
 liftctl set --profile 1 --dpi-stage 2=1000 --motion-sync off
+liftctl set --profile 1 --afk 30                 # sospensione dopo 30 min (a batteria; 0 = mai)
+liftctl set --profile 1 --stages 3               # il tasto viola scorre solo i primi 3 stadi
 liftctl set --profile 2 --color '#ff0000'
 liftctl restore-led-colors            # colori LED di fabbrica (solo quel campo)
 
@@ -285,7 +297,7 @@ i file del formato 1 (versioni precedenti) si caricano.
 
 Il mouse compare in CoolerControl come dispositivo **Lift Elite** con cinque
 canali "illuminazione" usati come selettori: stadio DPI (1–5), polling rate
-(250…8000 Hz, 8000 solo via cavo), lift-off (1/2 mm), motion sync (on/off) e
+(250…8000 Hz; con il ricevitore la radio resta a 4000 Hz), lift-off (1/2 mm), motion sync (on/off) e
 LED del profilo (un colore).
 
 Agiscono su **un** profilo, scelto nella pagina del plugin (Impostazioni →
@@ -354,6 +366,9 @@ se vuoi). I comandi funzionano in bash, zsh e fish.
   carica, temperatura e cicli sono mostrati; l'unità della corrente (~mA) e
   il comportamento esatto della carica vicino al 100 % mentre è in carica
   sono ancora da confermare (`liftctl battery --watch`)
+- **sospensione, numero di stadi DPI e stato del collegamento**: decodificati
+  dal firmware e disponibili nella GUI e in `liftctl`; la conferma su un
+  mouse reale è ancora in sospeso
 
 ## Test
 

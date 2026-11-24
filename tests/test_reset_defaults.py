@@ -58,7 +58,7 @@ class ResetDefaultsDeviceTest(unittest.TestCase):
             self.assertEqual(p.liftoff, 1)
             self.assertTrue(p.motion_sync)
             self.assertEqual(p.stage_count, 5)
-            self.assertEqual(p.raw[20], 0x0F)  # stage mask untouched (factory 0x0f)
+            self.assertEqual(p.raw[20], 0x0F)  # AFK timeout: factory 15 min
         # active profile restored (profile 3), only the needed slots activated
         self.assertEqual(self.emu.active_profile, 2)
         self.assertEqual(result.active, 2)
@@ -113,13 +113,15 @@ class FirmwareTableTest(unittest.TestCase):
         img = Path(__file__).resolve().parents[1] / "fw" / "Mouse_App_v1.01.0005_78384_8157779.bin"
         for slot, f in enumerate(FACTORY_SETTINGS):
             self.assertEqual(f, {"polling_hz": 1000, "liftoff": 1, "dpi": (400, 800, 1600, 3200, 6400),
-                                 "stage": slot + 1, "motion_sync": True})
+                                 "stage_count": 5, "stage": slot + 1, "motion_sync": True, "afk_minutes": 15})
         if not img.is_file():
             self.skipTest("firmware image not in the checkout (not distributed)")
         d = img.read_bytes()
         base = 0x29000
         tpl = d[0x3bcfb - base: 0x3bcfb - base + 19]
         self.assertEqual(tpl.hex(), "0502900120034006800c0019e803010f000001")
+        self.assertEqual(tpl[0], f["stage_count"])  # struct +1: stage count
+        self.assertEqual(tpl[15], f["afk_minutes"])  # struct +0x10: AFK minutes
         self.assertEqual(d[0x3bd2c - base: 0x3bd2c - base + 10].hex(), "1f0000f8e00740fd1ff8")
 
 

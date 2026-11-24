@@ -26,6 +26,9 @@ from ..protocol import (
     ENABLE_ACTIVE_PROFILE_APPLY,
     LIFTOFF_VALUES,
     POLLING_HZ,
+    STAGE_COUNT_MAX,
+    STAGE_COUNT_MIN,
+    LinkStatus,
     color_hex,
     polling_warning,
     rgb_to_rgb565,
@@ -33,8 +36,27 @@ from ..protocol import (
 from ..store import ProfileStore
 from .i18n import _
 
+# 8000 Hz is offered on both links: over the receiver the radio stays at
+# 4000 Hz but the sensor keeps its high-performance mode (see polling_warning).
 POLLING_CHOICES: tuple[int, ...] = tuple(POLLING_HZ[i] for i in sorted(POLLING_HZ))
 LIFTOFF_CHOICES: tuple[int, ...] = LIFTOFF_VALUES
+# Sleep (AFK) timeout presets in minutes; 0 = never. A value written by
+# another tool that is not in the list is shown as an extra entry.
+AFK_CHOICES: tuple[int, ...] = (0, 1, 2, 5, 10, 15, 30, 60)
+STAGE_COUNT_CHOICES: tuple[int, ...] = tuple(range(STAGE_COUNT_MIN, STAGE_COUNT_MAX + 1))
+
+
+def afk_choices(*current: int) -> tuple[int, ...]:
+    """Dropdown entries: the presets plus any of ``current`` (the edited value
+    and the one on the mouse) that is a custom value, in order."""
+    extra = {v for v in current if v is not None and v not in AFK_CHOICES}
+    if not extra:
+        return AFK_CHOICES
+    return tuple(sorted(set(AFK_CHOICES) | extra))
+
+
+def afk_choice_label(minutes: int) -> str:
+    return _("Never") if minutes == 0 else _("{n} min", n=minutes)
 
 BUTTON_LABELS = {
     "left": "Left button",
@@ -129,6 +151,28 @@ def battery_subtitle(b: BatteryStatus | None) -> str:
         return _("Not available")
     est = " " + _("(estimated)") if b.estimated else ""
     return f"{b.percent} %{est} · {_decimal(b.millivolts / 1000, 2)} V · {charge_label(b)}"
+
+
+def link_tooltip(link: LinkStatus | None) -> str | None:
+    """Tooltip of the Connection row: the read-only bc status bits."""
+    if link is None:
+        return None
+    yes, no = _("yes"), _("no")
+    return "\n".join((
+        _("USB cable power: {v}", v=yes if link.cable_power else no),
+        _("USB data (wired mode): {v}", v=yes if link.usb_data else no),
+        _("Internal link to the 8K bridge: {v}", v=_("up") if link.bridge_link else _("down")),
+    ))
+
+
+def connection_subtitle(transport_text: str, link: LinkStatus | None, path: str | None = None) -> str:
+    """Connection row text; cable power without USB data (receiver + charging cable) is appended."""
+    text = transport_text
+    if link is not None and transport_text and link.cable_power and not link.usb_data:
+        text += " · " + _("cable power")
+    if path:
+        text += f" · {path}"
+    return text
 
 
 def battery_tooltip(b: BatteryStatus | None, age: float | None = None) -> str:
@@ -261,6 +305,13 @@ class EditorModel:
     def set_active_stage(self, stage: int) -> Profile:
         return self._set(self.current().with_changes(stage=stage))
 
+    def set_stage_count(self, count: int) -> Profile:
+        """Stages in the purple-button cycle (1..5); the active stage is clamped into it."""
+        return self._set(self.current().with_changes(stage_count=count))
+
+    def set_afk(self, minutes: int) -> Profile:
+        return self._set(self.current().with_changes(afk_minutes=minutes))
+
     def set_color_rgb(self, r: int, g: int, b: int) -> Profile:
         return self._set(self.current().with_changes(color=rgb_to_rgb565(r, g, b)))
 
@@ -344,9 +395,13 @@ class EditorModel:
             out.append(f"{_('Lift-off')}: {a.liftoff} → {b.liftoff} mm")
         if a.motion_sync != b.motion_sync:
             out.append(f"{_('Motion sync')}: {_('on') if a.motion_sync else _('off')} → {_('on') if b.motion_sync else _('off')}")
-        for i, (x, y) in enumerate(zip(a.dpi_stages, b.dpi_stages, strict=False), start=1):
+        if a.stage_count != b.stage_count:
+            out.append(f"{_('DPI stages in the cycle')}: {a.stage_count} → {b.stage_count}")
+        for i, (x, y) in enumerate(zip(a.dpi, b.dpi, strict=False), start=1):
             if x != y:
                 out.append(f"{_('Stage {n}', n=i)}: {x} → {y} DPI")
+        if a.afk_minutes != b.afk_minutes:
+            out.append(f"{_('Sleep after')}: {afk_choice_label(a.afk_minutes)} → {afk_choice_label(b.afk_minutes)}")
         if a.stage != b.stage:
             out.append(f"{_('Active stage')}: {a.stage} → {b.stage}")
         if a.color != b.color:
@@ -431,6 +486,11 @@ class EditorModel:
     # --- warnings
     def polling_note(self) -> str | None:
         return polling_warning(self.current().polling_hz, self.transport)
+
+    @property
+    def link(self) -> LinkStatus | None:
+        """Last bc reading (cable power / USB data / internal link), or None."""
+        return self.state.link if self.state is not None else None
 
 
 # --- session: talks to the device; run it off the GTK main thread ----------------

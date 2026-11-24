@@ -26,6 +26,7 @@ from .protocol import (
     FACTORY_LED_NAMES,
     POLLING_HZ,
     BatteryStatus,
+    LinkStatus,
     format_action,
     parse_color,
     set_active_profile_packet,
@@ -72,6 +73,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  liftctl set --profile 1 --polling 1000 --liftoff 2\n"
             "  liftctl set --profile 1 --dpi 400,800,1600,3200,6400 --stage 2\n"
             "  liftctl set --profile 1 --dpi-stage 2=1000 --motion-sync off\n"
+            "  liftctl set --profile 1 --afk 30 --stages 3   (sleep after 30 min, 3 DPI stages)\n"
             "  liftctl remap --profile 1 --button forward --action volume-up\n"
             "  liftctl remap --profile 1 --button dpi --action key:0x04\n"
             "  liftctl remap --profile 1 --reset\n"
@@ -145,6 +147,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stage", type=int, metavar="K", help=_("active DPI stage stored in the profile (1..5)"))
     p.add_argument("--motion-sync", choices=("on", "off"))
     p.add_argument("--color", metavar="#RRGGBB", help=_("profile LED colour (RGB565, approximated)"))
+    p.add_argument("--stages", type=int, metavar="N",
+                   help=_("how many DPI stages the purple button cycles through (1..5)"))
+    p.add_argument("--afk", type=int, metavar="MIN",
+                   help=_("sleep after MIN minutes without use, on battery only (0 = never, 0..255; factory 15)"))
     p.set_defaults(handler=_cmd_set)
 
     p = sub.add_parser("remap", help=_("assign an action to a button of a profile"))
@@ -252,7 +258,11 @@ def _print_profile(profile: Profile, heading: str | None = None, transport: str 
     for i, value in enumerate(profile.dpi_stages, start=1):
         stages.append(f"[{value}]" if i == profile.stage else str(value))
     print(_("  DPI stages:   {stages}   (active: {stage})", stages=" ".join(stages), stage=profile.stage))
+    if profile.stage_count < len(profile.dpi):
+        off = " ".join(str(v) for v in profile.dpi[profile.stage_count:])
+        print(_("                {n} of 5 in the purple-button cycle (off: {off})", n=profile.stage_count, off=off))
     print(f"  Motion sync:  {'on' if profile.motion_sync else 'off'}")
+    print(_("  Sleep:        {value}", value=afk_label(profile.afk_minutes)))
     if profile.buttons is not None:
         print(_("  Buttons:"))
         for name in BUTTON_NAMES:
@@ -262,6 +272,26 @@ def _print_profile(profile: Profile, heading: str | None = None, transport: str 
             act = action_by_code(code)
             label = _(act.label) if act else _("unknown code")
             print(f"    {button_label(name):<20} {format_action(code):<18} ({label}, 0x{code:02x})")
+
+
+def afk_label(minutes: int) -> str:
+    if minutes == 0:
+        return _("never (on battery)")
+    return _("after {n} min without use (on battery)", n=minutes)
+
+
+def link_line(link: LinkStatus | None) -> str:
+    """One line for the bc status bits."""
+    if link is None:
+        return _("not available")
+    yes, no = _("yes"), _("no")
+    return _(
+        "cable power {power} · USB data {data} · internal link {bridge}  (bc bits {bits:03b})",
+        power=yes if link.cable_power else no,
+        data=yes if link.usb_data else no,
+        bridge=_("up") if link.bridge_link else _("down"),
+        bits=link.bits,
+    )
 
 
 def _snapshot_backup(dev: LiftElite, store: ProfileStore, indexes: list[int]) -> Path | None:
@@ -412,6 +442,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
             active = dev.read_active_profile()
         except LiftEliteError:
             pass
+        link = None
+        try:
+            link = dev.read_link_status(timeout=min(dev.timeout, 0.5), retries=1)
+        except LiftEliteError:
+            pass
     if args.json:
         sys.stdout.write(dumps_profiles(profiles))
         return 0
@@ -421,6 +456,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(head)
     if active is not None:
         print(_("Active profile on the mouse: {n}  (command 0x44, internal slot {slot})", n=display_profile(active), slot=active))
+    print(_("Link status: {line}", line=link_line(link)))
     print()
     for i, profile in enumerate(profiles):
         if i:
@@ -452,6 +488,7 @@ def _cmd_debug_dump(args: argparse.Namespace) -> int:
         READ_ONLY_COMMANDS,
         command_of,
         parse_active_profile_reply,
+        parse_link_status_reply,
     )
 
     lines: list[str] = []
@@ -482,6 +519,11 @@ def _cmd_debug_dump(args: argparse.Namespace) -> int:
                 try:
                     slot = parse_active_profile_reply(reply)
                     emit(_("# experimental reading: internal slot {slot} = user profile {n}", slot=slot, n=slot + 1))
+                except Exception:
+                    pass
+            if label.startswith("bc ") and reply is not None:
+                try:
+                    emit("# " + link_line(parse_link_status_reply(reply)))
                 except Exception:
                     pass
         emit()
@@ -526,7 +568,8 @@ def _cmd_set(args: argparse.Namespace) -> int:
     overrides = _parse_stage_overrides(args.dpi_stage)
     color = parse_color(args.color) if args.color else None
     motion = None if args.motion_sync is None else args.motion_sync == "on"
-    if all(v is None for v in (args.polling, args.liftoff, dpi, args.stage, motion, color)) and not overrides:
+    if all(v is None for v in (args.polling, args.liftoff, dpi, args.stage, motion, color, args.stages, args.afk)) \
+            and not overrides:
         raise ValidationError(_("nothing to change: give at least one option (--polling, --dpi, …)"))
     store = ProfileStore()
     with _open(args) as dev:
@@ -539,6 +582,8 @@ def _cmd_set(args: argparse.Namespace) -> int:
             stage=args.stage,
             motion_sync=motion,
             color=color,
+            stage_count=args.stages,
+            afk_minutes=args.afk,
         )
         if target.known_body() == current.known_body():
             print(_("The profile already has these values: nothing written."))
@@ -594,8 +639,9 @@ def _cmd_restore_led_colors(args: argparse.Namespace) -> int:
 def reset_summary() -> str:
     """What `reset-defaults` / «Reset everything» restores (firmware default table)."""
     return _("Every profile gets the factory buttons and LED colour (Blue, Red, Green, Yellow, Purple), "
-             "DPI stages 400/800/1600/3200/6400 with stage N active on profile N, 1000 Hz polling, "
-             "1 mm lift-off and motion sync on (values from the mouse firmware's default profile table).")
+             "all 5 DPI stages 400/800/1600/3200/6400 with stage N active on profile N, 1000 Hz polling, "
+             "1 mm lift-off, motion sync on and sleep after 15 min (values from the mouse firmware's "
+             "default profile table).")
 
 
 def _confirm(question: str) -> bool:

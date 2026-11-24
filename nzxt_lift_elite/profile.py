@@ -11,11 +11,15 @@ JSON (format 2)::
       "device": "NZXT Lift Elite", "format": 2, "name": "FPS",
       "profiles": [
         {"profile": 0, "polling_hz": 1000, "liftoff": 1,
-         "dpi_stages": [400, 800, 1600, 3200, 6400], "dpi_stage": 2,
-         "motion_sync": true, "color": "#0000ff",
+         "dpi_stages": [400, 800, 1600, 3200, 6400], "dpi_stage_count": 5,
+         "dpi_stage": 2, "motion_sync": true, "afk_minutes": 15, "color": "#0000ff",
          "buttons": {"left": "left-click", "forward": "volume-up", ...}}
       ]
     }
+
+``dpi_stages`` always lists the five stored values; ``dpi_stage_count``
+(1..5) says how many of them the purple button cycles through.
+``afk_minutes`` is the sleep timeout on battery (0 = never).
 
 Every field of a profile entry is optional: a load only changes what the
 file contains (read, modify, write, verify). Format 1 files from liftctl
@@ -47,12 +51,14 @@ from .protocol import (
     parse_profile_reply,
     polling_warning,
     validate_buttons,
+    validate_afk_minutes,
     validate_dpi_list,
     validate_dpi_value,
     validate_liftoff,
     validate_polling_hz,
     validate_profile_index,
     validate_stage,
+    validate_stage_count,
     write_profile_packet,
 )
 
@@ -78,8 +84,8 @@ class Profile:
     liftoff: int
     stage_count: int
     stage: int
-    dpi: tuple[int, ...]
-    stage_mask: int
+    dpi: tuple[int, ...]  # all five stored values
+    afk_minutes: int  # sleep timeout on battery, 0 = never
     color: bytes
     motion_sync: bool
     raw: bytes
@@ -98,7 +104,7 @@ class Profile:
             stage_count=body.stage_count,
             stage=body.stage,
             dpi=body.dpi,
-            stage_mask=body.stage_mask,
+            afk_minutes=body.afk_minutes,
             color=body.color,
             motion_sync=body.motion_sync,
             raw=body.raw,
@@ -107,6 +113,7 @@ class Profile:
 
     @property
     def dpi_stages(self) -> tuple[int, ...]:
+        """The values the purple button cycles through (first ``stage_count``)."""
         return tuple(self.dpi[: self.stage_count])
 
     @property
@@ -140,6 +147,8 @@ class Profile:
         dpi_stages: dict[int, int] | None = None,
         motion_sync: bool | None = None,
         color: bytes | None = None,
+        stage_count: int | None = None,
+        afk_minutes: int | None = None,
         buttons: dict | None = None,
         allow_unknown_actions: bool = False,
     ) -> Profile:
@@ -159,6 +168,8 @@ class Profile:
             dpi_stages=dpi_stages,
             motion_sync=motion_sync,
             color=color,
+            stage_count=stage_count,
+            afk_minutes=afk_minutes,
         )
         new_buttons = None if self.buttons is None else dict(self.buttons)
         if buttons:
@@ -182,9 +193,11 @@ class Profile:
             {
                 "polling_hz": self.polling_hz,
                 "liftoff": self.liftoff,
-                "dpi_stages": list(self.dpi_stages),
+                "dpi_stages": list(self.dpi),
+                "dpi_stage_count": self.stage_count,
                 "dpi_stage": self.stage,
                 "motion_sync": self.motion_sync,
+                "afk_minutes": self.afk_minutes,
                 "color": self.color_rgb_hex,
                 "indicator": self.color.hex(),
                 "buttons": self.button_names(),
@@ -197,9 +210,11 @@ class Profile:
             index=self.index,
             polling_hz=self.polling_hz,
             liftoff=self.liftoff,
-            dpi_stages=self.dpi_stages,
+            dpi_stages=tuple(self.dpi),
+            dpi_stage_count=self.stage_count,
             dpi_stage=self.stage if self.stage >= 1 else None,
             motion_sync=self.motion_sync,
+            afk_minutes=self.afk_minutes,
             indicator=self.color,
             buttons=dict(self.buttons) if self.buttons is not None else None,
         )
@@ -214,8 +229,12 @@ def diff_profiles(expected: Profile, actual: Profile) -> list[str]:
         problems.append(f"lift-off {actual.liftoff} != {expected.liftoff}")
     if expected.stage != actual.stage:
         problems.append(_("DPI stage") + f" {actual.stage} != {expected.stage}")
-    if expected.dpi_stages != actual.dpi_stages:
-        problems.append(_("DPI stage list") + f" {list(actual.dpi_stages)} != {list(expected.dpi_stages)}")
+    if expected.stage_count != actual.stage_count:
+        problems.append(_("number of DPI stages") + f" {actual.stage_count} != {expected.stage_count}")
+    if expected.dpi != actual.dpi:
+        problems.append(_("DPI stage list") + f" {list(actual.dpi)} != {list(expected.dpi)}")
+    if expected.afk_minutes != actual.afk_minutes:
+        problems.append(_("sleep timeout") + f" {actual.afk_minutes} != {expected.afk_minutes} min")
     if expected.motion_sync != actual.motion_sync:
         problems.append(f"motion sync {actual.motion_sync} != {expected.motion_sync}")
     if expected.color != actual.color:
@@ -263,15 +282,17 @@ class ProfileConfig:
     dpi_stage_overrides: dict[int, int] = field(default_factory=dict)
     motion_sync: bool | None = None
     indicator: bytes | None = None
+    dpi_stage_count: int | None = None
+    afk_minutes: int | None = None
     buttons: Buttons | None = None
     name: str | None = None
 
     def apply_to(self, profile: Profile, *, target_index: int | None = None) -> Profile:
         index = target_index if target_index is not None else (self.index if self.index is not None else profile.index)
         dpi = self.dpi_stages
-        if dpi is not None and len(dpi) != profile.stage_count:
+        if dpi is not None and len(dpi) != DPI_STAGE_COUNT:
             raise ValidationError(
-                _("the file has {n} DPI stages, the mouse profile has {m}", n=len(dpi), m=profile.stage_count)
+                _("the file has {n} DPI stages, the mouse profile has {m}", n=len(dpi), m=DPI_STAGE_COUNT)
             )
         # Named profiles omit colour (save_named include_color=False), so
         # loading one into another slot leaves that slot's LED unchanged.
@@ -285,6 +306,8 @@ class ProfileConfig:
             stage=self.dpi_stage,
             motion_sync=self.motion_sync,
             color=self.indicator,
+            stage_count=self.dpi_stage_count,
+            afk_minutes=self.afk_minutes,
         )
         if self.buttons is not None:
             merged = {**(profile.buttons or {}), **self.buttons}
@@ -301,12 +324,16 @@ class ProfileConfig:
             d["liftoff"] = self.liftoff
         if self.dpi_stages is not None:
             d["dpi_stages"] = list(self.dpi_stages)
+        if self.dpi_stage_count is not None:
+            d["dpi_stage_count"] = self.dpi_stage_count
         if self.dpi_stage is not None:
             d["dpi_stage"] = self.dpi_stage
         if self.dpi_stage_overrides:
             d["dpi_stage_overrides"] = {str(k): v for k, v in self.dpi_stage_overrides.items()}
         if self.motion_sync is not None:
             d["motion_sync"] = self.motion_sync
+        if self.afk_minutes is not None:
+            d["afk_minutes"] = self.afk_minutes
         if self.indicator is not None:
             d["color"] = color_hex(self.indicator)
             d["indicator"] = self.indicator.hex()
@@ -322,7 +349,9 @@ _KNOWN_KEYS = {
     "dpi_stages",
     "dpi_stage",
     "dpi_stage_overrides",
+    "dpi_stage_count",
     "motion_sync",
+    "afk_minutes",
     "indicator",
     "color",
     "buttons",
@@ -377,9 +406,16 @@ def profile_config_from_dict(data: dict[str, Any], *, allow_unknown_actions: boo
             raise ValidationError(_("dpi_stages must be a list of 5 integers"))
         parsed_dpi = tuple(validate_dpi_list(raw, DPI_STAGE_COUNT))
 
+    stage_count = _optional_int(data.get("dpi_stage_count"), "dpi_stage_count")
+    if stage_count is not None:
+        validate_stage_count(stage_count)
+    afk = _optional_int(data.get("afk_minutes"), "afk_minutes")
+    if afk is not None:
+        validate_afk_minutes(afk)
+
     dpi_stage = _optional_int(data.get("dpi_stage"), "dpi_stage")
     if dpi_stage is not None:
-        validate_stage(dpi_stage, DPI_STAGE_COUNT)
+        validate_stage(dpi_stage, stage_count or DPI_STAGE_COUNT)
 
     overrides_raw = data.get("dpi_stage_overrides") or {}
     if not isinstance(overrides_raw, dict):
@@ -429,6 +465,8 @@ def profile_config_from_dict(data: dict[str, Any], *, allow_unknown_actions: boo
         dpi_stage_overrides=overrides,
         motion_sync=motion,
         indicator=indicator,
+        dpi_stage_count=stage_count,
+        afk_minutes=afk,
         buttons=parsed_buttons,
         name=name,
     )

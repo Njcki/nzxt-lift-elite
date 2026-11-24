@@ -85,9 +85,19 @@ class EditorTest(unittest.TestCase):
 
     def test_polling_note(self):
         m = self.model
-        self.assertIsNotNone(m.polling_note())  # slot 0 is 8000 Hz
+        # Slot 0 is 8000 Hz. By cable 8000 is real: no note. Over the
+        # receiver every rate gets a short note (radio 4 kHz / sensor mode).
+        self.assertEqual(m.transport, "wired")
+        self.assertIsNone(m.polling_note())
         m.set_polling(1000)
         self.assertIsNone(m.polling_note())
+        with mock.patch.object(type(m), "transport", new_callable=mock.PropertyMock, return_value="wireless"):
+            low = m.polling_note()
+            self.assertIsNotNone(low)
+            m.set_polling(8000)
+            high = m.polling_note()
+            self.assertIn("4000", high)
+            self.assertNotEqual(low, high)
 
     def test_named_profile_into_other_slot(self):
         with tempfile.TemporaryDirectory() as tmp:

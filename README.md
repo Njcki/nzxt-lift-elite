@@ -153,15 +153,22 @@ wireless mouse is asleep, reads time out: move it and try again.
 - **live DPI stage**: while the window is focused, the app polls the active
   profile and its current stage (read-only). A short press of the purple
   button is reflected in the UI.
-- **performance**: polling rate (warns that 8000 Hz works only over the
-  cable), lift-off 1/2 mm, motion sync, profile LED colour
+- **performance**: polling rate, lift-off 1/2 mm, motion sync, profile LED
+  colour, and **Sleep after** (Never, 1, 2, 5, 10, 15, 30, 60 min, or a
+  custom value already on the mouse; factory 15 min, counts only on battery)
 - **mouse preview**: a stylized, clickable drawing of the mouse, including
   the underside for the purple button. The preview height is resizable
   within limits (default 280 px, roughly 180–420 px; double-click the handle
   to reset). The two views sit side by side or stack, depending on width.
   librsvg is used when available; otherwise a built-in vector drawing.
 - **5 DPI stages** with slider and number field (50–26000, steps of 50); the
-  active stage stored in the profile is highlighted
+  active stage stored in the profile is highlighted. A **Stages** dropdown
+  (1–5) in the header sets how many stages the purple button cycles through;
+  stages beyond that stay visible but dimmed and keep their value
+- **8000 Hz over the receiver**: the radio stays at 4000 Hz, but the sensor
+  remains in high-performance mode (higher battery use). On battery,
+  250–4000 Hz use the sensor's power-saving mode. The note under the polling
+  control explains this
 - **battery**: percent from the mouse's fuel gauge, plus voltage, charging
   state, temperature and cycle count. A battery indicator sits on the preview
   card (details in the tooltip and in the Device section). It is read on
@@ -172,7 +179,10 @@ wireless mouse is asleep, reads time out: move it and try again.
   the indicator is dimmed. Works over both the cable and the receiver.
 - **live connection**: plugging or unplugging the cable or receiver is
   detected automatically (the cable is preferred when both are present);
-  unsaved edits are kept and nothing is written on its own
+  unsaved edits are kept and nothing is written on its own. The Connection
+  row tooltip shows the read-only link status (cable power, USB data,
+  internal bridge); if the cable is only charging while the receiver is in
+  use, the row also says so
 - **buttons**: click a button and pick an action from a searchable list
   (clicks, media keys, letters, F1–F24, modifiers…). Button rows of a
   profile that is not active on the mouse are locked: a remap always writes
@@ -236,6 +246,8 @@ liftctl debug-dump --out before.txt   # read-only hex dump of all known reads
 liftctl set --profile 1 --polling 1000 --liftoff 2
 liftctl set --profile 1 --dpi 400,800,1600,3200,6400 --stage 2
 liftctl set --profile 1 --dpi-stage 2=1000 --motion-sync off
+liftctl set --profile 1 --afk 30                 # sleep after 30 min (on battery; 0 = never)
+liftctl set --profile 1 --stages 3               # purple button cycles the first 3 stages
 liftctl set --profile 2 --color '#ff0000'
 liftctl restore-led-colors            # factory LED colours (only that field)
 
@@ -313,8 +325,10 @@ Example file (format 2):
     {
       "polling_hz": 1000,
       "liftoff": 1,
+      "dpi_stage_count": 5,
       "dpi_stages": [400, 800, 1600, 3200, 6400],
       "dpi_stage": 2,
+      "afk_minutes": 15,
       "motion_sync": true,
       "color": "#0000ff",
       "buttons": {"left": "left-click", "middle": "middle-click", "right": "right-click",
@@ -337,7 +351,7 @@ as a **Lift Elite** device with five "lighting" channels used as selectors:
 | channel | values |
 |---|---|
 | DPI stage | stage 1–5 (current DPI in the label) |
-| Polling rate | 250 … 8000 Hz (8000 only over the cable) |
+| Polling rate | 250 … 8000 Hz (over the receiver the radio stays at 4000 Hz) |
 | Lift-off | 1 mm / 2 mm |
 | Motion sync | on / off |
 | Profile LED | a colour |
@@ -411,6 +425,9 @@ want). The commands above work in bash, zsh and fish.
   cycle count are shown; the current (~mA) unit and the exact state-of-charge
   behaviour near 100 % while charging are still being confirmed
   (`liftctl battery --watch`)
+- **sleep timeout, DPI stage count and link status**: decoded from the
+  firmware and exposed in the GUI and `liftctl`; confirmation on a real
+  mouse is still pending
 
 ## Python library
 

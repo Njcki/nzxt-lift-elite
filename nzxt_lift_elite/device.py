@@ -58,7 +58,13 @@ from .protocol import (
     REPLY_ID_WORD_HDR,
     REPLY_OK,
     REPLY_STATUS_PREFIX,
+    REPLY_LINK_STATUS_PREFIX,
+    AFK_MINUTES_FACTORY,
+    STAGE_COUNT_FACTORY,
     BatteryStatus,
+    LinkStatus,
+    link_status_packet,
+    parse_link_status_reply,
     parse_battery_reply,
     REPLY_UID_HDR,
     TARGET_DONGLE,
@@ -394,6 +400,8 @@ class DeviceState:
     active_profile: int | None = None
     # Decoded b0 reply (fuel gauge), or None if the read failed.
     battery: BatteryStatus | None = None
+    # Decoded bc reply (cable power / wired data / internal link), or None.
+    link: LinkStatus | None = None
 
 
 class LiftElite:
@@ -646,6 +654,15 @@ class LiftElite:
         with self.locked():
             return parse_battery_reply(self.read_status())
 
+    def read_link_status(self, *, timeout: float | None = None, retries: int | None = None) -> LinkStatus:
+        """Read-only ``bc``: cable power (VBUS), wired USB data path, internal link.
+
+        One byte, no side effects (see protocol.LinkStatus). Raises
+        ProtocolError when the mouse does not answer.
+        """
+        reply = self.transact(link_status_packet(), REPLY_LINK_STATUS_PREFIX, timeout=timeout, retries=retries)
+        return parse_link_status_reply(reply)
+
     def read_uid(self) -> bytes:
         """Raw 16-byte payload of the read-only ``0x03`` device-id reply."""
         reply = self.transact(uid_packet(), REPLY_UID_HDR)
@@ -737,6 +754,7 @@ class LiftElite:
             ("44 get-active-profile", read_active_profile_packet(), REPLY_GET_ACTIVE_PROFILE_HDR),
             ("b0 status", status_packet(), REPLY_STATUS_PREFIX),
             ("b8 id-word", id_word_packet(), REPLY_ID_WORD_HDR),
+            ("bc link-status", link_status_packet(), REPLY_LINK_STATUS_PREFIX),
         ]
         for i in range(5):
             jobs.append((f"92 profile {i}", read_profile_packet(i), read_profile_reply_prefix(i)))
@@ -795,15 +813,22 @@ class LiftElite:
                 battery = self.read_battery()
             except ProtocolError:
                 pass
+            link = None
+            try:
+                # Optional extra: one short attempt, so a mouse/receiver that
+                # does not forward bc never slows the full read down.
+                link = self.read_link_status(timeout=min(self.timeout, 0.4), retries=1)
+            except ProtocolError:
+                pass
         return DeviceState(
             info=self.info, firmware=fw, receiver_firmware=rx, profiles=profiles, active_profile=active,
-            battery=battery,
+            battery=battery, link=link,
         )
 
     # --- writes ------------------------------------------------------------
 
     def write_profile_body(self, profile: Profile, *, verify: bool = True) -> Profile:
-        """Write the known body (polling / lift-off / DPI / motion sync / colour) of one slot."""
+        """Write the known body (polling / lift-off / DPI / stage count / AFK / motion sync / colour) of one slot."""
         packet = write_profile_packet(profile.index, profile.raw)
         with self.locked():
             self.transact(packet, REPLY_OK)
@@ -929,18 +954,13 @@ class LiftElite:
     def factory_target(self, current: Profile) -> Profile:
         """``current`` with the factory defaults applied.
 
-        Button map: CAM's factory reset. Body (DPI stages, active stage,
-        polling, lift-off, motion sync, LED colour): the firmware's default
-        profile table, see FACTORY_SETTINGS. DPI values are only written when
-        the profile has the factory stage count (5).
+        Button map: CAM's factory reset. Body (DPI values, 5 stages, active
+        stage, polling, lift-off, motion sync, AFK 15 min, LED colour): the
+        firmware's default profile table, see FACTORY_SETTINGS.
         """
         target = current.with_changes(color=FACTORY_LED_COLORS[current.index])
         if FACTORY_SETTINGS is not None:
-            fields = dict(FACTORY_SETTINGS[current.index])
-            if current.stage_count != len(fields.get("dpi", ())):
-                fields.pop("dpi", None)
-                fields.pop("stage", None)
-            target = target.with_changes(**fields)
+            target = target.with_changes(**FACTORY_SETTINGS[current.index])
         return target.with_buttons(factory_buttons())
 
     def reset_defaults(
@@ -1009,14 +1029,17 @@ class ResetResult:
 #   05 | 02 | 9001 2003 4006 800c 0019 | e803 | 01 | 0f | 0000 | 01
 #   count, stage(overwritten), DPI 400/800/1600/3200/6400 (u16le),
 #   polling 1000 Hz (u16le Hz; 0x92 turns it into code 2), lift-off 1,
-#   stage mask 0x0f, colour (from the table), motion sync on.
+#   AFK timeout 0x0f = 15 min, colour (from the table), motion sync on.
 # The struct offsets match what the 0x92/0x93 handlers (app_cmd.c) read and
-# write. The same template is in the updater and dongle images. Stage count
-# (5) and mask (0x0f) are never written by this library; with_changes()
-# keeps them.
+# write. The same template is in the updater and dongle images. The reset
+# writes the stage count (5) and the AFK timeout (15 min) too, through the
+# same verified 0x93 write.
 FACTORY_DPI = (400, 800, 1600, 3200, 6400)
 FACTORY_SETTINGS: tuple[dict, ...] | None = tuple(
-    {"polling_hz": 1000, "liftoff": 1, "dpi": FACTORY_DPI, "stage": slot + 1, "motion_sync": True}
+    {
+        "polling_hz": 1000, "liftoff": 1, "dpi": FACTORY_DPI, "stage_count": STAGE_COUNT_FACTORY,
+        "stage": slot + 1, "motion_sync": True, "afk_minutes": AFK_MINUTES_FACTORY,
+    }
     for slot in range(5)
 )
 
